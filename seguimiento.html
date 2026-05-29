@@ -6,8 +6,6 @@
     <title>LEOPI FOOD | Seguimiento de pedido</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
-    <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -29,7 +27,6 @@
         .btn { display: inline-block; padding: 12px 24px; background: #f97316; color: white; text-decoration: none; border-radius: 30px; margin: 10px; transition: all 0.3s; }
         .btn-outline { background: white; color: #f97316; border: 2px solid #f97316; }
         #mapa { height: 350px; margin: 20px 0; border-radius: 20px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-        .eta-panel { background: #f1f5f9; border-radius: 16px; padding: 12px; margin-top: 10px; font-size: 14px; display: flex; justify-content: space-between; }
         @media (max-width: 768px) { .tracking-container { padding: 30px 20px; margin: 20px; } .order-code-big { font-size: 32px; } }
     </style>
 </head>
@@ -39,102 +36,80 @@
     </div>
 
     <script>
+        // Configuración Supabase
         const supabaseUrl = 'https://jznsyvdasufrvudfglje.supabase.co';
         const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6bnN5dmRhc3VmcnZ1ZGZnbGplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2ODAyMDgsImV4cCI6MjA5NTI1NjIwOH0.nIHQHqEv9Gf_jZNOgpomkJ7SznGqg5dDB40kIVkIgig';
         const supabaseClient = supabase.createClient(supabaseUrl, supabaseKey);
 
-        let map = null, deliveryMarker = null, routingControl = null;
-        let currentPedido = null, destinoCoords = null;
-        let pedidoSubscription = null, ubicacionSubscription = null;
-        let mapaInicializado = false;
+        // Variables globales
+        let map = null;
+        let deliveryMarker = null;
+        let currentPedido = null;
+        let pedidoSubscription = null;
+        let ubicacionSubscription = null;
 
-        // --- Funciones auxiliares ---
-        function getEstadoTexto(s) {
-            const estados = { pending:'🟡 Pendiente', preparing:'🟠 En preparación', ready:'✅ Listo', delivered:'📦 Entregado', cancelled:'❌ Cancelado' };
-            return estados[s] || 'Desconocido';
+        // ---------- Funciones auxiliares ----------
+        function getEstadoTexto(status) {
+            const estados = { 'pending': '🟡 Pendiente', 'preparing': '🟠 En preparación', 'ready': '✅ Listo', 'delivered': '📦 Entregado', 'cancelled': '❌ Cancelado' };
+            return estados[status] || 'Estado desconocido';
         }
-        function getEstadoClase(s) {
-            const clases = { pending:'status-pending', preparing:'status-preparing', ready:'status-ready', delivered:'status-delivered', cancelled:'status-cancelled' };
-            return clases[s] || 'status-pending';
+
+        function getEstadoClase(status) {
+            const clases = { 'pending': 'status-pending', 'preparing': 'status-preparing', 'ready': 'status-ready', 'delivered': 'status-delivered', 'cancelled': 'status-cancelled' };
+            return clases[status] || 'status-pending';
         }
-        function getTiempoLabel(f) {
-            return f ? new Date(f).toLocaleTimeString('es-ES', { hour:'2-digit', minute:'2-digit' }) : '--:--';
+
+        function getTiempoLabel(fecha) {
+            if (!fecha) return '--:--';
+            const date = new Date(fecha);
+            return date.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
         }
-        function getStepStatus(order, step) {
-            const orderIdx = ['pending','preparing','ready','delivered'].indexOf(order);
-            const stepIdx = ['pending','preparing','ready','delivered'].indexOf(step);
-            if (stepIdx < orderIdx) return 'completed';
-            if (stepIdx === orderIdx) return 'active';
+
+        function getStepStatus(orderStatus, stepStatus) {
+            const orderIndex = ['pending', 'preparing', 'ready', 'delivered'].indexOf(orderStatus);
+            const stepIndex = ['pending', 'preparing', 'ready', 'delivered'].indexOf(stepStatus);
+            if (stepIndex < orderIndex) return 'completed';
+            if (stepIndex === orderIndex) return 'active';
             return '';
         }
 
-        // --- Mapa y marcador (solo se llama cuando estado ready/delivered)---
-        function initMap(center) {
-            if (map) map.remove();
-            const c = center || { lat: -12.119, lng: -77.031 };
-            map = L.map('mapa').setView([c.lat, c.lng], 14);
+        // ---------- Mapa: solo el marcador del repartidor (moto) ----------
+        function initMap(initialLatLng = null) {
+            if (map) {
+                map.remove();
+                map = null;
+            }
+            const defaultCenter = { lat: -12.119, lng: -77.031 }; // restaurante (solo respaldo)
+            const center = initialLatLng || defaultCenter;
+            map = L.map('mapa').setView([center.lat, center.lng], 14);
             L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-                attribution: '&copy; OSM & CartoDB', subdomains: 'abcd', maxZoom: 19
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; CartoDB',
+                subdomains: 'abcd',
+                maxZoom: 19
             }).addTo(map);
-            mapaInicializado = true;
+            console.log('Mapa inicializado, centro:', center);
         }
 
         function updateDeliveryMarker(lat, lng) {
-            if (!map) return;
+            if (!map) {
+                console.warn('updateDeliveryMarker: mapa no listo');
+                return;
+            }
             if (deliveryMarker) {
                 deliveryMarker.setLatLng([lat, lng]);
+                console.log('Marcador movido a:', lat, lng);
             } else {
                 const motoIcon = L.divIcon({
-                    html: '<div style="background:#f97316; width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:20px; border:2px solid white;">🛵</div>',
-                    iconSize: [32,32]
+                    html: '<div style="background-color: #f97316; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 20px; border: 2px solid white; box-shadow: 0 2px 6px rgba(0,0,0,0.3);">🛵</div>',
+                    iconSize: [32, 32],
+                    className: 'repartidor-marker'
                 });
-                deliveryMarker = L.marker([lat, lng], { icon: motoIcon }).addTo(map).bindPopup('Repartidor');
+                deliveryMarker = L.marker([lat, lng], { icon: motoIcon }).addTo(map);
+                deliveryMarker.bindPopup('🚚 Repartidor en camino');
+                console.log('Marcador de repartidor CREADO en:', lat, lng);
             }
             map.setView([lat, lng], map.getZoom());
             deliveryMarker.openPopup();
-            if (routingControl && destinoCoords) {
-                routingControl.getPlan().setWaypoints([L.latLng(lat, lng), L.latLng(destinoCoords.lat, destinoCoords.lng)]);
-            }
-        }
-
-        // --- Geocodificación con fallback y caché ---
-        async function geocodeAddress(address) {
-            if (!address) return null;
-            try {
-                const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`;
-                const resp = await fetch(url, { headers: { 'Accept-Language': 'es' } });
-                const data = await resp.json();
-                if (data && data.length > 0) {
-                    return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
-                }
-            } catch(e) { console.warn('Geocoding error:', e); }
-            return null;
-        }
-
-        async function ensureDestinoCoords(pedido) {
-            // Si ya tenemos coordenadas en memoria, devolverlas
-            if (destinoCoords) return destinoCoords;
-            // Intentar desde la base de datos
-            if (pedido.destino_lat && pedido.destino_lng) {
-                destinoCoords = { lat: pedido.destino_lat, lng: pedido.destino_lng };
-                return destinoCoords;
-            }
-            // Si no, geocodificar solo si tenemos dirección y si es delivery y estado ready/delivered
-            if (pedido.order_type === 'delivery' && pedido.delivery_address && 
-                (pedido.status === 'ready' || pedido.status === 'delivered')) {
-                const coords = await geocodeAddress(pedido.delivery_address);
-                if (coords) {
-                    destinoCoords = coords;
-                    // Guardar en DB para futuras ocasiones
-                    await supabaseClient.from('pedidos').update({ destino_lat: coords.lat, destino_lng: coords.lng }).eq('id', pedido.id);
-                    return coords;
-                } else {
-                    // Fallback: coordenadas de Miraflores por si la geocodificación falla
-                    destinoCoords = { lat: -12.119, lng: -77.031 };
-                    return destinoCoords;
-                }
-            }
-            return null;
         }
 
         async function loadLastLocation(pedidoId) {
@@ -143,11 +118,20 @@
                 .select('lat, lng')
                 .eq('pedido_id', pedidoId)
                 .maybeSingle();
-            return (data && data.lat && data.lng) ? { lat: data.lat, lng: data.lng } : null;
+            if (!error && data && data.lat && data.lng) {
+                console.log('Última ubicación cargada:', data.lat, data.lng);
+                updateDeliveryMarker(data.lat, data.lng);
+                return { lat: data.lat, lng: data.lng };
+            } else {
+                console.log('No se encontró ubicación previa para este pedido');
+                return null;
+            }
         }
 
         function subscribeToLocation(pedidoId) {
-            if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
+            if (ubicacionSubscription) {
+                supabaseClient.removeChannel(ubicacionSubscription);
+            }
             ubicacionSubscription = supabaseClient
                 .channel(`ubicaciones-${pedidoId}`)
                 .on('postgres_changes', {
@@ -157,13 +141,18 @@
                     filter: `pedido_id=eq.${pedidoId}`
                 }, (payload) => {
                     const { lat, lng } = payload.new;
-                    if (lat && lng && map) updateDeliveryMarker(lat, lng);
+                    console.log('📍 Ubicación actualizada en tiempo real:', lat, lng);
+                    if (lat && lng) updateDeliveryMarker(lat, lng);
                 })
-                .subscribe();
+                .subscribe((status) => {
+                    console.log('Suscripción a ubicación estado:', status);
+                });
         }
 
         function subscribeToPedido(pedidoId) {
-            if (pedidoSubscription) supabaseClient.removeChannel(pedidoSubscription);
+            if (pedidoSubscription) {
+                supabaseClient.removeChannel(pedidoSubscription);
+            }
             pedidoSubscription = supabaseClient
                 .channel(`pedido-${pedidoId}`)
                 .on('postgres_changes', {
@@ -171,171 +160,168 @@
                     schema: 'public',
                     table: 'pedidos',
                     filter: `id=eq.${pedidoId}`
-                }, async (payload) => {
-                    const nuevoPedido = payload.new;
-                    currentPedido = nuevoPedido;
-                    // Actualizar timeline y tarjeta
-                    await actualizarUI(nuevoPedido);
-                    // Manejar mapa según nuevo estado
-                    await manejarMapa(nuevoPedido);
+                }, (payload) => {
+                    console.log('📦 Pedido actualizado:', payload.new);
+                    currentPedido = payload.new;
+                    updateUIWithPedido(currentPedido);
+                    const isDelivery = currentPedido.order_type === 'delivery';
+                    const showMap = isDelivery && (currentPedido.status === 'ready' || currentPedido.status === 'delivered');
+                    const mapaDiv = document.getElementById('mapa');
+                    if (showMap && !map && mapaDiv) {
+                        iniciarMapaYUbicacion(currentPedido.id);
+                    } else if (!showMap && map) {
+                        if (map) map.remove();
+                        map = null;
+                        if (deliveryMarker) deliveryMarker = null;
+                        if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
+                    }
                 })
                 .subscribe();
         }
 
-        // Función que maneja la creación/eliminación del mapa según estado
-        async function manejarMapa(pedido) {
+        // Actualiza la interfaz (timeline, info, etc.) sin recargar el mapa
+        function updateUIWithPedido(pedido) {
+            const status = pedido.status || 'pending';
             const isDelivery = pedido.order_type === 'delivery';
-            const showMap = isDelivery && (pedido.status === 'ready' || pedido.status === 'delivered');
-            const mapaDiv = document.getElementById('mapa');
-            
-            if (showMap) {
-                // Asegurar que tenemos coordenadas del destino
-                const coords = await ensureDestinoCoords(pedido);
-                if (!coords) return;
-                
-                // Si el mapa no existe, crearlo
-                if (!map) {
-                    const lastLoc = await loadLastLocation(pedido.id);
-                    initMap(lastLoc || null);
-                    if (lastLoc) updateDeliveryMarker(lastLoc.lat, lastLoc.lng);
-                    
-                    // Crear control de rutas
-                    if (!routingControl) {
-                        routingControl = L.Routing.control({
-                            waypoints: lastLoc ? [L.latLng(lastLoc.lat, lastLoc.lng), L.latLng(coords.lat, coords.lng)] : [],
-                            routeWhileDragging: false,
-                            showAlternatives: false,
-                            lineOptions: { styles: [{ color: '#f97316', weight: 4 }] },
-                            addWaypoints: false,
-                            draggableWaypoints: false,
-                            show: false
-                        }).addTo(map);
-                        routingControl.on('routesfound', (e) => {
-                            const route = e.routes[0];
-                            const distance = (route.summary.totalDistance / 1000).toFixed(1);
-                            const duration = Math.round(route.summary.totalTime / 60);
-                            const etaDiv = document.querySelector('.eta-panel');
-                            if (etaDiv) etaDiv.innerHTML = `<span>🚚 Distancia restante: ${distance} km</span><span>⏱️ Tiempo estimado: ${duration} min</span>`;
-                        });
-                    } else if (lastLoc) {
-                        routingControl.getPlan().setWaypoints([L.latLng(lastLoc.lat, lastLoc.lng), L.latLng(coords.lat, coords.lng)]);
-                    }
-                    subscribeToLocation(pedido.id);
-                } else {
-                    // Mapa ya existe, actualizar ruta si es necesario
-                    const lastLoc = await loadLastLocation(pedido.id);
-                    if (lastLoc && routingControl) {
-                        routingControl.getPlan().setWaypoints([L.latLng(lastLoc.lat, lastLoc.lng), L.latLng(coords.lat, coords.lng)]);
-                    }
-                }
-            } else {
-                // Si no debe mostrar mapa, limpiar recursos
-                if (map) {
-                    map.remove();
-                    map = null;
-                    deliveryMarker = null;
-                    routingControl = null;
-                    if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
-                    mapaInicializado = false;
-                }
-            }
-        }
-
-        // Actualiza solo la UI no-mapa (timeline, info)
-        async function actualizarUI(pedido) {
-            const status = pedido.status;
-            const isDelivery = pedido.order_type === 'delivery';
-            const totalItems = pedido.items?.reduce((s,i)=>s+i.quantity,0) || 0;
-            const tipoEntrega = isDelivery ? '🚚 Delivery' : '🏪 Recojo';
-            const metodoPagoMap = { yape:'Yape', card:'Tarjeta', bcp:'Transferencia BCP', cash:'Efectivo' };
+            const totalItems = pedido.items?.reduce((sum, i) => sum + i.quantity, 0) || 0;
+            const tipoEntrega = isDelivery ? '🚚 Delivery' : '🏪 Recojo en tienda';
+            const direccion = pedido.delivery_address || 'Av. Larco 123, Miraflores';
+            const metodoPagoMap = { 'yape': 'Yape', 'card': 'Tarjeta', 'bcp': 'Transferencia BCP', 'cash': 'Efectivo' };
             const metodoPago = metodoPagoMap[pedido.payment_method] || 'Efectivo';
 
-            // Actualizar timeline
-            const steps = ['pending','preparing','ready','delivered'];
-            steps.forEach((step, idx) => {
-                const stepDiv = document.querySelectorAll('.status-step')[idx];
-                if (stepDiv) {
-                    stepDiv.className = `status-step ${getStepStatus(status, step)}`;
-                    const timeSpan = stepDiv.querySelector('.status-time');
-                    if (timeSpan) {
-                        let val = '--:--';
-                        if (step === 'pending') val = getTiempoLabel(pedido.created_at);
-                        if (step === 'preparing') val = getTiempoLabel(pedido.started_at);
-                        if (step === 'ready') val = getTiempoLabel(pedido.ready_at);
-                        if (step === 'delivered') val = getTiempoLabel(pedido.delivered_at);
-                        timeSpan.innerText = val;
+            // Verificar si ya existe la estructura del timeline
+            const timelineSteps = document.querySelectorAll('.status-step');
+            if (timelineSteps.length > 0) {
+                // Actualizar dinámicamente
+                const steps = ['pending', 'preparing', 'ready', 'delivered'];
+                steps.forEach((step, idx) => {
+                    const stepDiv = timelineSteps[idx];
+                    if (stepDiv) {
+                        stepDiv.className = `status-step ${getStepStatus(status, step)}`;
+                        const timeSpan = stepDiv.querySelector('.status-time');
+                        if (timeSpan) {
+                            let timeValue = '--:--';
+                            if (step === 'pending') timeValue = getTiempoLabel(pedido.created_at);
+                            if (step === 'preparing') timeValue = getTiempoLabel(pedido.started_at);
+                            if (step === 'ready') timeValue = getTiempoLabel(pedido.ready_at);
+                            if (step === 'delivered') timeValue = getTiempoLabel(pedido.delivered_at);
+                            timeSpan.innerText = timeValue;
+                        }
                     }
+                });
+                const statusBadge = document.querySelector('.status-badge');
+                if (statusBadge) {
+                    statusBadge.className = `status-badge ${getEstadoClase(status)}`;
+                    statusBadge.innerText = getEstadoTexto(status);
                 }
-            });
-            const badge = document.querySelector('.status-badge');
-            if (badge) {
-                badge.className = `status-badge ${getEstadoClase(status)}`;
-                badge.innerText = getEstadoTexto(status);
-            }
-            const infoCard = document.querySelector('.info-card');
-            if (infoCard) {
-                infoCard.innerHTML = `
-                    <p><strong>Cliente:</strong> ${pedido.customer_name || 'No especificado'}</p>
-                    <p><strong>Teléfono:</strong> ${pedido.customer_phone || 'No especificado'}</p>
-                    <p><strong>Entrega:</strong> ${tipoEntrega}</p>
-                    <p><strong>Dirección:</strong> ${pedido.delivery_address || 'Av. Larco 123, Miraflores'}</p>
-                    <p><strong>Pago:</strong> ${metodoPago}</p>
-                    <p><strong>Productos:</strong> ${totalItems} items</p>
-                    <p><strong>Total:</strong> S/ ${(pedido.total || 0).toFixed(2)}</p>
-                    ${pedido.notes ? `<p><strong>Notas:</strong> ${pedido.notes}</p>` : ''}
+                // Actualizar datos de la tarjeta de información
+                const infoCard = document.querySelector('.info-card');
+                if (infoCard) {
+                    // Reemplazar contenido de la info-card de forma selectiva
+                    infoCard.innerHTML = `
+                        <p><strong>Cliente:</strong> ${pedido.customer_name || 'No especificado'}</p>
+                        <p><strong>Teléfono:</strong> ${pedido.customer_phone || 'No especificado'}</p>
+                        <p><strong>Entrega:</strong> ${tipoEntrega}</p>
+                        <p><strong>Dirección:</strong> ${direccion}</p>
+                        <p><strong>Pago:</strong> ${metodoPago}</p>
+                        <p><strong>Productos:</strong> ${totalItems} items</p>
+                        <p><strong>Total:</strong> S/ ${(pedido.total || 0).toFixed(2)}</p>
+                        ${pedido.notes ? `<p><strong>Notas:</strong> ${pedido.notes}</p>` : ''}
+                    `;
+                }
+            } else {
+                // Primera carga: construir toda la interfaz
+                const container = document.getElementById('trackingContainer');
+                const mapaHtml = `<div id="mapa" style="height:350px; margin:20px 0; border-radius:20px; overflow:hidden; box-shadow:0 4px 12px rgba(0,0,0,0.1);"></div>`;
+                const html = `
+                    <div class="realtime-badge">
+                        <i class="fas fa-circle"></i> EN VIVO - Actualización automática
+                    </div>
+                    <h1>Seguimiento de pedido</h1>
+                    <div class="order-code-big">${pedido.order_number}</div>
+                    <div class="status-badge ${getEstadoClase(status)}">${getEstadoTexto(status)}</div>
+                    <div class="status-timeline">
+                        <div class="status-step ${getStepStatus(status, 'pending')}">
+                            <div class="step-dot">1</div>
+                            <div class="status-label">Pedido recibido</div>
+                            <div class="status-time">${getTiempoLabel(pedido.created_at)}</div>
+                        </div>
+                        <div class="status-step ${getStepStatus(status, 'preparing')}">
+                            <div class="step-dot">2</div>
+                            <div class="status-label">Preparando</div>
+                            <div class="status-time">${getTiempoLabel(pedido.started_at)}</div>
+                        </div>
+                        <div class="status-step ${getStepStatus(status, 'ready')}">
+                            <div class="step-dot">3</div>
+                            <div class="status-label">Listo</div>
+                            <div class="status-time">${getTiempoLabel(pedido.ready_at)}</div>
+                        </div>
+                        <div class="status-step ${getStepStatus(status, 'delivered')}">
+                            <div class="step-dot">4</div>
+                            <div class="status-label">Entregado</div>
+                            <div class="status-time">${getTiempoLabel(pedido.delivered_at)}</div>
+                        </div>
+                    </div>
+                    <div class="info-card">
+                        <p><strong>Cliente:</strong> ${pedido.customer_name || 'No especificado'}</p>
+                        <p><strong>Teléfono:</strong> ${pedido.customer_phone || 'No especificado'}</p>
+                        <p><strong>Entrega:</strong> ${tipoEntrega}</p>
+                        <p><strong>Dirección:</strong> ${direccion}</p>
+                        <p><strong>Pago:</strong> ${metodoPago}</p>
+                        <p><strong>Productos:</strong> ${totalItems} items</p>
+                        <p><strong>Total:</strong> S/ ${(pedido.total || 0).toFixed(2)}</p>
+                        ${pedido.notes ? `<p><strong>Notas:</strong> ${pedido.notes}</p>` : ''}
+                    </div>
+                    ${mapaHtml}
+                    <div>
+                        <a href="http://64.176.16.35/index.html" class="btn">← Volver al inicio</a>
+                        <a href="#" class="btn btn-outline" onclick="window.print()">🖨️ Imprimir</a>
+                    </div>
                 `;
+                container.innerHTML = html;
+            }
+
+            // Control del mapa según tipo de entrega y estado
+            const showMap = isDelivery && (pedido.status === 'ready' || pedido.status === 'delivered');
+            const mapaDiv = document.getElementById('mapa');
+            if (showMap && !map && mapaDiv) {
+                iniciarMapaYUbicacion(pedido.id);
+            } else if (!showMap && map) {
+                if (map) map.remove();
+                map = null;
+                if (deliveryMarker) deliveryMarker = null;
+                if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
             }
         }
 
-        // --- Construcción inicial de la página (solo una vez)---
+        async function iniciarMapaYUbicacion(pedidoId) {
+            const lastLoc = await loadLastLocation(pedidoId);
+            initMap(lastLoc || null);
+            subscribeToLocation(pedidoId);
+        }
+
         async function init() {
-            const codigo = new URLSearchParams(window.location.search).get('codigo');
+            const urlParams = new URLSearchParams(window.location.search);
+            const codigo = urlParams.get('codigo');
             if (!codigo) {
                 document.getElementById('trackingContainer').innerHTML = `<div class="tracking-container"><div class="error"><h2>Código no válido</h2><a href="http://64.176.16.35/index.html" class="btn">Volver</a></div></div>`;
                 return;
             }
 
             try {
-                const { data: pedido, error } = await supabaseClient.from('pedidos').select('*').eq('order_number', codigo).single();
+                const { data: pedido, error } = await supabaseClient
+                    .from('pedidos')
+                    .select('*')
+                    .eq('order_number', codigo)
+                    .single();
+
                 if (error || !pedido) {
                     document.getElementById('trackingContainer').innerHTML = `<div class="tracking-container"><div class="error"><h2>Pedido no encontrado</h2><a href="http://64.176.16.35/index.html" class="btn">Volver</a></div></div>`;
                     return;
                 }
 
                 currentPedido = pedido;
-
-                // Construir la interfaz HTML estática
-                const container = document.getElementById('trackingContainer');
-                container.innerHTML = `
-                    <div class="realtime-badge">🔴 EN VIVO</div>
-                    <h1>Seguimiento de pedido</h1>
-                    <div class="order-code-big">${pedido.order_number}</div>
-                    <div class="status-badge ${getEstadoClase(pedido.status)}">${getEstadoTexto(pedido.status)}</div>
-                    <div class="status-timeline">
-                        <div class="status-step ${getStepStatus(pedido.status,'pending')}"><div class="step-dot">1</div><div class="status-label">Pedido recibido</div><div class="status-time">${getTiempoLabel(pedido.created_at)}</div></div>
-                        <div class="status-step ${getStepStatus(pedido.status,'preparing')}"><div class="step-dot">2</div><div class="status-label">Preparando</div><div class="status-time">${getTiempoLabel(pedido.started_at)}</div></div>
-                        <div class="status-step ${getStepStatus(pedido.status,'ready')}"><div class="step-dot">3</div><div class="status-label">Listo</div><div class="status-time">${getTiempoLabel(pedido.ready_at)}</div></div>
-                        <div class="status-step ${getStepStatus(pedido.status,'delivered')}"><div class="step-dot">4</div><div class="status-label">Entregado</div><div class="status-time">${getTiempoLabel(pedido.delivered_at)}</div></div>
-                    </div>
-                    <div class="info-card">
-                        <p><strong>Cliente:</strong> ${pedido.customer_name || 'No especificado'}</p>
-                        <p><strong>Teléfono:</strong> ${pedido.customer_phone || 'No especificado'}</p>
-                        <p><strong>Entrega:</strong> ${pedido.order_type === 'delivery' ? '🚚 Delivery' : '🏪 Recojo'}</p>
-                        <p><strong>Dirección:</strong> ${pedido.delivery_address || 'Av. Larco 123, Miraflores'}</p>
-                        <p><strong>Pago:</strong> ${pedido.payment_method === 'yape' ? 'Yape' : pedido.payment_method === 'card' ? 'Tarjeta' : pedido.payment_method === 'bcp' ? 'Transferencia BCP' : 'Efectivo'}</p>
-                        <p><strong>Productos:</strong> ${pedido.items?.reduce((s,i)=>s+i.quantity,0) || 0} items</p>
-                        <p><strong>Total:</strong> S/ ${(pedido.total || 0).toFixed(2)}</p>
-                        ${pedido.notes ? `<p><strong>Notas:</strong> ${pedido.notes}</p>` : ''}
-                    </div>
-                    <div id="mapa" style="height:350px; margin:20px 0;"></div>
-                    <div class="eta-panel"><span>🚚 Distancia restante: -- km</span><span>⏱️ Tiempo estimado: -- min</span></div>
-                    <div><a href="http://64.176.16.35/index.html" class="btn">← Volver</a><a href="#" class="btn btn-outline" onclick="window.print()">🖨️ Imprimir</a></div>
-                `;
-
-                // Primera actualización de UI y mapa
-                await actualizarUI(pedido);
-                await manejarMapa(pedido);
-                // Suscribirse a cambios futuros
+                updateUIWithPedido(pedido);
                 subscribeToPedido(pedido.id);
             } catch (error) {
                 console.error(error);
