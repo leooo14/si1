@@ -12,10 +12,11 @@
     <style>
         body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #1e293b; color: white; }
         #mapa { height: 500px; border-radius: 12px; margin-bottom: 20px; }
-        .info { background: #0f172a; padding: 15px; border-radius: 12px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+        .info { background: #0f172a; padding: 15px; border-radius: 12px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
         button { background: #22c55e; border: none; padding: 12px 24px; border-radius: 30px; font-weight: bold; cursor: pointer; font-size: 16px; }
         button:hover { background: #16a34a; }
         .eta { background: #334155; padding: 10px; border-radius: 8px; margin-top: 10px; text-align: center; }
+        @media (max-width: 640px) { .info { flex-direction: column; align-items: stretch; } button { width: 100%; } }
     </style>
 </head>
 <body>
@@ -35,7 +36,6 @@
 
         let map, routingControl, watchId, currentPedido, destinoCoords;
 
-        // Obtener código del pedido desde URL (ej: ?pedido=ORD-123)
         const orderNumber = new URLSearchParams(window.location.search).get('pedido');
         if (!orderNumber) {
             document.body.innerHTML = '<h2>Error: No se especificó el número de pedido</h2><a href="javascript:history.back()">Volver</a>';
@@ -51,7 +51,6 @@
         }
 
         async function init() {
-            // Cargar pedido
             const { data: pedido, error } = await supabase.from('pedidos').select('*').eq('order_number', orderNumber).single();
             if (error || !pedido) {
                 alert('Pedido no encontrado');
@@ -62,7 +61,7 @@
             document.getElementById('customerName').innerText = pedido.customer_name || '---';
             document.getElementById('customerAddress').innerText = pedido.delivery_address || '---';
 
-            // Obtener coordenadas del destino (usar las guardadas o geocodificar)
+            // Obtener coordenadas del destino
             if (pedido.destino_lat && pedido.destino_lng) {
                 destinoCoords = { lat: pedido.destino_lat, lng: pedido.destino_lng };
             } else if (pedido.delivery_address) {
@@ -76,21 +75,35 @@
                 return;
             }
 
+            // Si el pedido ya está entregado, no empezar tracking
+            if (pedido.status === 'delivered') {
+                document.getElementById('btnEntregar').disabled = true;
+                document.getElementById('btnEntregar').style.opacity = '0.6';
+                document.getElementById('etaPanel').innerHTML = '✅ Pedido ya entregado';
+                // Solo mostrar el mapa con el destino
+                map = L.map('mapa').setView([destinoCoords.lat, destinoCoords.lng], 13);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+                L.marker([destinoCoords.lat, destinoCoords.lng]).addTo(map).bindPopup('📍 Cliente');
+                return;
+            }
+
             // Inicializar mapa centrado en el destino
             map = L.map('mapa').setView([destinoCoords.lat, destinoCoords.lng], 13);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
             L.marker([destinoCoords.lat, destinoCoords.lng]).addTo(map).bindPopup('📍 Cliente');
 
-            // Iniciar tracking de ubicación
             startTracking();
 
-            // Botón entregado
             document.getElementById('btnEntregar').onclick = async () => {
                 const { error } = await supabase.from('pedidos').update({ status: 'delivered', delivered_at: new Date() }).eq('id', pedido.id);
                 if (!error) {
                     alert('Pedido marcado como entregado');
                     if (watchId) navigator.geolocation.clearWatch(watchId);
-                } else alert('Error al actualizar');
+                    document.getElementById('btnEntregar').disabled = true;
+                    document.getElementById('etaPanel').innerHTML = '✅ Pedido entregado';
+                } else {
+                    alert('Error al actualizar');
+                }
             };
         }
 
@@ -99,7 +112,6 @@
             watchId = navigator.geolocation.watchPosition(
                 async (pos) => {
                     const { latitude, longitude } = pos.coords;
-                    // Actualizar o crear ruta
                     if (!routingControl) {
                         routingControl = L.Routing.control({
                             waypoints: [L.latLng(latitude, longitude), L.latLng(destinoCoords.lat, destinoCoords.lng)],
@@ -118,7 +130,6 @@
                     } else {
                         routingControl.getPlan().setWaypoints([L.latLng(latitude, longitude), L.latLng(destinoCoords.lat, destinoCoords.lng)]);
                     }
-                    // Guardar ubicación en Supabase usando pedido_id (entero)
                     await supabase.from('ubicacion_repartidor').upsert({
                         pedido_id: currentPedido.id,
                         lat: latitude,

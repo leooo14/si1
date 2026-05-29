@@ -47,7 +47,7 @@
         let currentPedido = null, destinoCoords = null;
         let pedidoSubscription = null, ubicacionSubscription = null;
 
-        // --- Auxiliares (igual que antes) ---
+        // --- Auxiliares ---
         function getEstadoTexto(s) { return { pending:'🟡 Pendiente', preparing:'🟠 En preparación', ready:'✅ Listo', delivered:'📦 Entregado', cancelled:'❌ Cancelado' }[s] || 'Desconocido'; }
         function getEstadoClase(s) { return { pending:'status-pending', preparing:'status-preparing', ready:'status-ready', delivered:'status-delivered', cancelled:'status-cancelled' }[s] || 'status-pending'; }
         function getTiempoLabel(f) { return f ? new Date(f).toLocaleTimeString('es-ES', { hour:'2-digit', minute:'2-digit' }) : '--:--'; }
@@ -79,22 +79,18 @@
             }
             map.setView([lat, lng], map.getZoom());
             deliveryMarker.openPopup();
-
-            // Actualizar ruta si existe
             if (routingControl && destinoCoords) {
                 routingControl.getPlan().setWaypoints([L.latLng(lat, lng), L.latLng(destinoCoords.lat, destinoCoords.lng)]);
             }
         }
 
-        // --- Obtener coordenadas del destino desde dirección (geocodificación) ---
+        // --- Geocodificación y coordenadas del destino ---
         async function geocodeAddress(address) {
             if (!address) return null;
             const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`;
             const resp = await fetch(url, { headers: { 'Accept-Language': 'es' } });
             const data = await resp.json();
-            if (data && data.length > 0) {
-                return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
-            }
+            if (data && data.length > 0) return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
             return null;
         }
 
@@ -102,28 +98,24 @@
             if (pedido.destino_lat && pedido.destino_lng) {
                 return { lat: pedido.destino_lat, lng: pedido.destino_lng };
             }
-            // Si no tiene coordenadas guardadas, geocodificar y guardar en la tabla
+            if (!pedido.delivery_address) return null;
             const coords = await geocodeAddress(pedido.delivery_address);
             if (coords) {
-                // Guardar en la base de datos para futuras veces
                 await supabaseClient.from('pedidos').update({ destino_lat: coords.lat, destino_lng: coords.lng }).eq('id', pedido.id);
                 return coords;
             }
             return null;
         }
 
-        // --- Cargar última ubicación del repartidor ---
         async function loadLastLocation(pedidoId) {
             const { data, error } = await supabaseClient
                 .from('ubicacion_repartidor')
                 .select('lat, lng')
                 .eq('pedido_id', pedidoId)
                 .maybeSingle();
-            if (data && data.lat && data.lng) return { lat: data.lat, lng: data.lng };
-            return null;
+            return (data && data.lat && data.lng) ? { lat: data.lat, lng: data.lng } : null;
         }
 
-        // --- Suscripciones ---
         function subscribeToLocation(pedidoId) {
             if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
             ubicacionSubscription = supabaseClient
@@ -144,20 +136,27 @@
                     (payload) => {
                         currentPedido = payload.new;
                         updateUIWithPedido(currentPedido);
-                        const showMap = (currentPedido.order_type === 'delivery' && (currentPedido.status === 'ready' || currentPedido.status === 'delivered'));
-                        if (showMap && !map) iniciarMapaYUbicacion(currentPedido.id);
-                        else if (!showMap && map) { if(map) map.remove(); map=null; deliveryMarker=null; routingControl=null; if(ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription); }
+                        const isDelivery = currentPedido.order_type === 'delivery';
+                        const showMap = isDelivery && (currentPedido.status === 'ready' || currentPedido.status === 'delivered');
+                        if (showMap && !map && destinoCoords) iniciarMapaYUbicacion(currentPedido.id);
+                        else if (!showMap && map) limpiarMapa();
                     })
                 .subscribe();
         }
 
-        // --- Inicializar mapa y ruta ---
+        function limpiarMapa() {
+            if (map) map.remove();
+            map = null;
+            deliveryMarker = null;
+            routingControl = null;
+            if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
+        }
+
         async function iniciarMapaYUbicacion(pedidoId) {
             const lastLoc = await loadLastLocation(pedidoId);
             if (!destinoCoords) return;
             initMap(lastLoc || null);
             if (lastLoc) updateDeliveryMarker(lastLoc.lat, lastLoc.lng);
-            
             if (!routingControl) {
                 routingControl = L.Routing.control({
                     waypoints: lastLoc ? [L.latLng(lastLoc.lat, lastLoc.lng), L.latLng(destinoCoords.lat, destinoCoords.lng)] : [],
@@ -181,7 +180,6 @@
             subscribeToLocation(pedidoId);
         }
 
-        // --- Actualizar interfaz (timeline, info) ---
         async function updateUIWithPedido(pedido) {
             const status = pedido.status;
             const isDelivery = pedido.order_type === 'delivery';
@@ -189,15 +187,13 @@
             const tipoEntrega = isDelivery ? '🚚 Delivery' : '🏪 Recojo';
             const metodoPagoMap = { yape:'Yape', card:'Tarjeta', bcp:'Transferencia BCP', cash:'Efectivo' };
             const metodoPago = metodoPagoMap[pedido.payment_method] || 'Efectivo';
-            
-            // Obtener coordenadas del destino (si es delivery y no las tenemos)
+
             if (isDelivery && !destinoCoords) {
                 destinoCoords = await ensureDestinoCoords(pedido);
             }
 
             const existeTimeline = document.querySelectorAll('.status-step').length > 0;
             if (!existeTimeline) {
-                // Primera carga: construir todo
                 const container = document.getElementById('trackingContainer');
                 container.innerHTML = `
                     <div class="realtime-badge">🔴 EN VIVO</div>
@@ -225,25 +221,25 @@
                     <div><a href="http://64.176.16.35/index.html" class="btn">← Volver</a><a href="#" class="btn btn-outline" onclick="window.print()">🖨️ Imprimir</a></div>
                 `;
             } else {
-                // Actualizar dinámicamente timeline e info card
+                // Actualizar timeline y badge dinámicamente
                 const steps = ['pending','preparing','ready','delivered'];
                 steps.forEach((step, idx) => {
                     const stepDiv = document.querySelectorAll('.status-step')[idx];
-                    if(stepDiv) stepDiv.className = `status-step ${getStepStatus(status, step)}`;
+                    if (stepDiv) stepDiv.className = `status-step ${getStepStatus(status, step)}`;
                     const timeSpan = stepDiv?.querySelector('.status-time');
-                    if(timeSpan) {
+                    if (timeSpan) {
                         let val = '--:--';
-                        if(step==='pending') val=getTiempoLabel(pedido.created_at);
-                        if(step==='preparing') val=getTiempoLabel(pedido.started_at);
-                        if(step==='ready') val=getTiempoLabel(pedido.ready_at);
-                        if(step==='delivered') val=getTiempoLabel(pedido.delivered_at);
+                        if (step==='pending') val = getTiempoLabel(pedido.created_at);
+                        if (step==='preparing') val = getTiempoLabel(pedido.started_at);
+                        if (step==='ready') val = getTiempoLabel(pedido.ready_at);
+                        if (step==='delivered') val = getTiempoLabel(pedido.delivered_at);
                         timeSpan.innerText = val;
                     }
                 });
                 const badge = document.querySelector('.status-badge');
-                if(badge) { badge.className = `status-badge ${getEstadoClase(status)}`; badge.innerText = getEstadoTexto(status); }
+                if (badge) { badge.className = `status-badge ${getEstadoClase(status)}`; badge.innerText = getEstadoTexto(status); }
                 const info = document.querySelector('.info-card');
-                if(info) {
+                if (info) {
                     info.innerHTML = `<p><strong>Cliente:</strong> ${pedido.customer_name || 'No especificado'}</p>
                                     <p><strong>Teléfono:</strong> ${pedido.customer_phone || 'No especificado'}</p>
                                     <p><strong>Entrega:</strong> ${tipoEntrega}</p>
@@ -260,12 +256,10 @@
             if (showMap && !map && mapaDiv && destinoCoords) {
                 iniciarMapaYUbicacion(pedido.id);
             } else if (!showMap && map) {
-                if(map) map.remove(); map=null; deliveryMarker=null; routingControl=null;
-                if(ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
+                limpiarMapa();
             }
         }
 
-        // --- Inicio ---
         async function init() {
             const codigo = new URLSearchParams(window.location.search).get('codigo');
             if (!codigo) return mostrarError('Código no válido');
