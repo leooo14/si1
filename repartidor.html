@@ -2,146 +2,136 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-    <title>LEOPI FOOD - Repartidor</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #0f172a; color: white; }
-        .container { max-width: 600px; margin: auto; background: #1e293b; padding: 20px; border-radius: 20px; }
-        select, button { width: 100%; padding: 12px; margin: 10px 0; border-radius: 30px; border: none; font-size: 16px; }
-        button { background: #f97316; color: white; font-weight: bold; cursor: pointer; }
-        .estado { text-align: center; margin-top: 20px; padding: 10px; border-radius: 20px; }
-        .activo { background: #10b981; }
-        .inactivo { background: #ef4444; }
-        #coords { font-size: 12px; text-align: center; margin-top: 10px; color: #94a3b8; }
-        .mensaje { text-align: center; padding: 20px; color: #f97316; }
-    </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LEOPI FOOD | Panel del Repartidor</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
+    <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #1e293b; color: white; }
+        #mapa { height: 500px; border-radius: 12px; margin-bottom: 20px; }
+        .info { background: #0f172a; padding: 15px; border-radius: 12px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+        button { background: #22c55e; border: none; padding: 12px 24px; border-radius: 30px; font-weight: bold; cursor: pointer; font-size: 16px; }
+        button:hover { background: #16a34a; }
+        .eta { background: #334155; padding: 10px; border-radius: 8px; margin-top: 10px; text-align: center; }
+    </style>
 </head>
 <body>
-    <div class="container">
-        <h2>🚚 Panel del repartidor</h2>
-        <label>Selecciona el pedido que vas a entregar:</label>
-        <select id="pedidoSelect">
-            <option value="">-- Cargando pedidos listos --</option>
-        </select>
-        <button id="startTracking">▶️ Iniciar seguimiento</button>
-        <button id="stopTracking">⏹️ Detener seguimiento</button>
-        <div id="status" class="estado inactivo">❌ No activo</div>
-        <div id="coords"></div>
-        <div id="mensaje" class="mensaje"></div>
+    <div class="info">
+        <div><strong>Pedido:</strong> <span id="orderNumber">---</span></div>
+        <div><strong>Cliente:</strong> <span id="customerName">---</span></div>
+        <div><strong>Dirección:</strong> <span id="customerAddress">---</span></div>
+        <button id="btnEntregar">✅ Marcar como entregado</button>
     </div>
+    <div id="mapa"></div>
+    <div class="eta" id="etaPanel">🔄 Calculando ruta...</div>
 
     <script>
-        // Configuración de Supabase (usa tus credenciales)
         const supabaseUrl = 'https://jznsyvdasufrvudfglje.supabase.co';
         const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6bnN5dmRhc3VmcnZ1ZGZnbGplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2ODAyMDgsImV4cCI6MjA5NTI1NjIwOH0.nIHQHqEv9Gf_jZNOgpomkJ7SznGqg5dDB40kIVkIgig';
-        const supabaseClient = supabase.createClient(supabaseUrl, supabaseKey);
+        const supabase = supabase.createClient(supabaseUrl, supabaseKey);
 
-        let watchId = null;
-        let pedidoActivo = null;
+        let map, routingControl, watchId, currentPedido, destinoCoords;
 
-        async function cargarPedidos() {
-            try {
-                // Obtener pedidos directamente desde Supabase (HTTPS)
-                const { data: pedidos, error } = await supabaseClient
-                    .from('pedidos')
-                    .select('*')
-                    .eq('status', 'ready')
-                    .eq('order_type', 'delivery');
+        // Obtener código del pedido desde URL (ej: ?pedido=ORD-123)
+        const orderNumber = new URLSearchParams(window.location.search).get('pedido');
+        if (!orderNumber) {
+            document.body.innerHTML = '<h2>Error: No se especificó el número de pedido</h2><a href="javascript:history.back()">Volver</a>';
+            throw new Error('Falta pedido');
+        }
 
-                if (error) throw error;
+        async function geocodeAddress(address) {
+            const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`;
+            const resp = await fetch(url);
+            const data = await resp.json();
+            if (data.length) return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+            return null;
+        }
 
-                const listos = pedidos || [];
-                const select = document.getElementById('pedidoSelect');
-                const mensajeDiv = document.getElementById('mensaje');
-                
-                if (listos.length === 0) {
-                    select.innerHTML = '<option value="">-- No hay pedidos listos --</option>';
-                    mensajeDiv.innerHTML = '⚠️ No hay pedidos en estado "Listo" con delivery. Marca algún pedido como "Listo" desde el administrador.';
-                    return;
+        async function init() {
+            // Cargar pedido
+            const { data: pedido, error } = await supabase.from('pedidos').select('*').eq('order_number', orderNumber).single();
+            if (error || !pedido) {
+                alert('Pedido no encontrado');
+                return;
+            }
+            currentPedido = pedido;
+            document.getElementById('orderNumber').innerText = pedido.order_number;
+            document.getElementById('customerName').innerText = pedido.customer_name || '---';
+            document.getElementById('customerAddress').innerText = pedido.delivery_address || '---';
+
+            // Obtener coordenadas del destino (usar las guardadas o geocodificar)
+            if (pedido.destino_lat && pedido.destino_lng) {
+                destinoCoords = { lat: pedido.destino_lat, lng: pedido.destino_lng };
+            } else if (pedido.delivery_address) {
+                destinoCoords = await geocodeAddress(pedido.delivery_address);
+                if (destinoCoords) {
+                    await supabase.from('pedidos').update({ destino_lat: destinoCoords.lat, destino_lng: destinoCoords.lng }).eq('id', pedido.id);
                 }
-                mensajeDiv.innerHTML = '';
-                select.innerHTML = '<option value="">-- Selecciona un pedido --</option>';
-                listos.forEach(p => {
-                    const option = document.createElement('option');
-                    option.value = p.id;
-                    option.textContent = `${p.order_number} - ${p.customer_name}`;
-                    select.appendChild(option);
-                });
-            } catch (error) {
-                console.error(error);
-                document.getElementById('mensaje').innerHTML = '❌ Error cargando pedidos. Revisa conexión con Supabase.';
             }
+            if (!destinoCoords) {
+                alert('No se pudo determinar la ubicación del cliente');
+                return;
+            }
+
+            // Inicializar mapa centrado en el destino
+            map = L.map('mapa').setView([destinoCoords.lat, destinoCoords.lng], 13);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+            L.marker([destinoCoords.lat, destinoCoords.lng]).addTo(map).bindPopup('📍 Cliente');
+
+            // Iniciar tracking de ubicación
+            startTracking();
+
+            // Botón entregado
+            document.getElementById('btnEntregar').onclick = async () => {
+                const { error } = await supabase.from('pedidos').update({ status: 'delivered', delivered_at: new Date() }).eq('id', pedido.id);
+                if (!error) {
+                    alert('Pedido marcado como entregado');
+                    if (watchId) navigator.geolocation.clearWatch(watchId);
+                } else alert('Error al actualizar');
+            };
         }
 
-        async function enviarUbicacion(lat, lng) {
-            if (!pedidoActivo) return;
-            try {
-                const { error } = await supabaseClient
-                    .from('ubicacion_repartidor')
-                    .upsert({ pedido_id: pedidoActivo, lat, lng, updated_at: new Date() });
-                if (error) throw error;
-                document.getElementById('coords').innerHTML = `📡 Última ubicación: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
-            } catch (err) {
-                console.error('Error enviando ubicación', err);
-                document.getElementById('coords').innerHTML = '❌ Error al enviar ubicación';
-            }
-        }
-
-        function iniciarSeguimiento() {
-            if (!pedidoActivo) {
-                alert('Selecciona un pedido primero');
-                return;
-            }
-            if (watchId !== null) {
-                alert('El seguimiento ya está activo');
-                return;
-            }
-            if (!navigator.geolocation) {
-                alert('Tu navegador no soporta geolocalización.');
-                return;
-            }
+        function startTracking() {
+            if (!navigator.geolocation) return alert('Geolocalización no soportada');
             watchId = navigator.geolocation.watchPosition(
-                (position) => {
-                    const { latitude, longitude } = position.coords;
-                    enviarUbicacion(latitude, longitude);
-                    document.getElementById('status').className = 'estado activo';
-                    document.getElementById('status').innerHTML = '✅ Envío de ubicación ACTIVO';
+                async (pos) => {
+                    const { latitude, longitude } = pos.coords;
+                    // Actualizar o crear ruta
+                    if (!routingControl) {
+                        routingControl = L.Routing.control({
+                            waypoints: [L.latLng(latitude, longitude), L.latLng(destinoCoords.lat, destinoCoords.lng)],
+                            routeWhileDragging: false,
+                            showAlternatives: false,
+                            lineOptions: { styles: [{ color: '#3388ff', weight: 5 }] },
+                            addWaypoints: false,
+                            draggableWaypoints: false
+                        }).addTo(map);
+                        routingControl.on('routesfound', (e) => {
+                            const r = e.routes[0];
+                            const dist = (r.summary.totalDistance / 1000).toFixed(1);
+                            const time = Math.round(r.summary.totalTime / 60);
+                            document.getElementById('etaPanel').innerHTML = `📏 Distancia restante: ${dist} km · ⏱️ ${time} minutos`;
+                        });
+                    } else {
+                        routingControl.getPlan().setWaypoints([L.latLng(latitude, longitude), L.latLng(destinoCoords.lat, destinoCoords.lng)]);
+                    }
+                    // Guardar ubicación en Supabase usando pedido_id (entero)
+                    await supabase.from('ubicacion_repartidor').upsert({
+                        pedido_id: currentPedido.id,
+                        lat: latitude,
+                        lng: longitude,
+                        updated_at: new Date()
+                    });
                 },
-                (error) => {
-                    console.error(error);
-                    let msg = 'Error al obtener ubicación. ';
-                    if (error.code === 1) msg += 'Permiso denegado. Asegúrate de dar permiso de ubicación.';
-                    else if (error.code === 2) msg += 'Ubicación no disponible.';
-                    else if (error.code === 3) msg += 'Timeout. Revisa tu conexión.';
-                    alert(msg);
-                    document.getElementById('status').className = 'estado inactivo';
-                    document.getElementById('status').innerHTML = '❌ Error de geolocalización';
-                },
-                { enableHighAccuracy: true, maximumAge: 3000, timeout: 10000 }
+                (err) => console.error('Error GPS:', err),
+                { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
             );
         }
 
-        function detenerSeguimiento() {
-            if (watchId !== null) {
-                navigator.geolocation.clearWatch(watchId);
-                watchId = null;
-                document.getElementById('status').className = 'estado inactivo';
-                document.getElementById('status').innerHTML = '❌ Seguimiento detenido';
-            }
-        }
-
-        document.getElementById('startTracking').onclick = iniciarSeguimiento;
-        document.getElementById('stopTracking').onclick = detenerSeguimiento;
-        document.getElementById('pedidoSelect').onchange = (e) => {
-            pedidoActivo = parseInt(e.target.value);
-            if (pedidoActivo) {
-                document.getElementById('status').innerHTML = '⏳ Listo para iniciar seguimiento';
-            }
-        };
-
-        cargarPedidos();
-        setInterval(cargarPedidos, 10000);
+        init();
     </script>
 </body>
 </html>
