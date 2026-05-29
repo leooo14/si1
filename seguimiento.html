@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LEOPI FOOD | Seguimiento de pedido</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', sans-serif; background: #f8fafc; padding: 20px; }
+        .tracking-container { max-width: 600px; margin: 50px auto; background: white; border-radius: 30px; padding: 40px; box-shadow: 0 20px 40px rgba(0,0,0,0.1); text-align: center; }
+        .realtime-badge { background: #ef4444; color: white; padding: 8px 16px; border-radius: 50px; display: inline-flex; align-items: center; gap: 8px; font-size: 14px; margin-bottom: 20px; animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
+        .order-code-big { font-size: 48px; font-weight: 800; background: linear-gradient(135deg, #f97316, #f59e0b); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin: 20px 0; }
+        .status-timeline { display: flex; justify-content: space-between; margin: 50px 0; position: relative; }
+        .status-timeline::before { content: ''; position: absolute; top: 20px; left: 0; right: 0; height: 4px; background: #e2e8f0; z-index: 1; }
+        .status-step { position: relative; z-index: 2; flex: 1; text-align: center; }
+        .step-dot { width: 40px; height: 40px; background: white; border: 4px solid #e2e8f0; border-radius: 50%; margin: 0 auto 10px; display: flex; align-items: center; justify-content: center; font-weight: bold; background: white; }
+        .status-step.completed .step-dot { background: #10b981; border-color: #10b981; color: white; }
+        .status-step.active .step-dot { background: #f97316; border-color: #f97316; color: white; box-shadow: 0 0 0 8px rgba(249,115,22,0.2); }
+        .status-label { font-weight: 600; margin-bottom: 5px; }
+        .status-time { font-size: 12px; color: #64748b; }
+        .info-card { background: #f8fafc; border-radius: 20px; padding: 20px; margin: 20px 0; text-align: left; }
+        .info-card p { margin: 8px 0; display: flex; align-items: center; gap: 8px; }
+        .btn { display: inline-block; padding: 12px 24px; background: #f97316; color: white; text-decoration: none; border-radius: 30px; margin: 10px; transition: all 0.3s; }
+        .btn-outline { background: white; color: #f97316; border: 2px solid #f97316; }
+        #mapa { height: 350px; margin: 20px 0; border-radius: 20px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        @media (max-width: 768px) { .tracking-container { padding: 30px 20px; margin: 20px; } .order-code-big { font-size: 32px; } }
+    </style>
+</head>
+<body>
+    <div class="public-container">
+        <div class="tracking-container" id="trackingContainer">
+            Cargando...
+        </div>
+    </div>
+
+    <script>
+        // Configuración Supabase
+        const supabaseUrl = 'https://jznsyvdasufrvudfglje.supabase.co';
+        const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6bnN5dmRhc3VmcnZ1ZGZnbGplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2ODAyMDgsImV4cCI6MjA5NTI1NjIwOH0.Wb_9F3TfF6ZJqKQxYjZzvFp_LF1RgVqQZPkWxqUjG1s';
+        const supabaseClient = supabase.createClient(supabaseUrl, supabaseKey);
+        const API_BASE = 'http://64.176.16.35:3000/api';
+
+        let map = null;
+        let marker = null;
+        let subscription = null;
+        let currentPedido = null;
+
+        function getEstadoTexto(status) {
+            const estados = { 'pending': '🟡 Pendiente', 'preparing': '🟠 En preparación', 'ready': '✅ Listo para recoger', 'delivered': '📦 Entregado', 'cancelled': '❌ Cancelado' };
+            return estados[status] || 'Estado desconocido';
+        }
+
+        function getEstadoClase(status) {
+            const clases = { 'pending': 'status-pending', 'preparing': 'status-preparing', 'ready': 'status-ready', 'delivered': 'status-delivered', 'cancelled': 'status-cancelled' };
+            return clases[status] || 'status-pending';
+        }
+
+        function getTiempoLabel(fecha) {
+            if (!fecha) return '--:--';
+            const date = new Date(fecha);
+            return date.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+        }
+
+        function getStepStatus(orderStatus, stepStatus) {
+            const orderIndex = ['pending', 'preparing', 'ready', 'delivered'].indexOf(orderStatus);
+            const stepIndex = ['pending', 'preparing', 'ready', 'delivered'].indexOf(stepStatus);
+            if (stepIndex < orderIndex) return 'completed';
+            if (stepIndex === orderIndex) return 'active';
+            return '';
+        }
+
+        function initDeliveryMap() {
+            if (map) {
+                map.remove();
+                map = null;
+            }
+            // Coordenadas iniciales (restaurante)
+            const restaurante = { lat: -12.119, lng: -77.031 };
+            map = L.map('mapa').setView([restaurante.lat, restaurante.lng], 14);
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; CartoDB',
+                subdomains: 'abcd',
+                maxZoom: 19
+            }).addTo(map);
+
+            const repartidorIcon = L.divIcon({
+                html: '<div style="background-color: #f97316; width: 24px; height: 24px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 6px rgba(0,0,0,0.3);"></div>',
+                iconSize: [24, 24],
+                className: 'repartidor-marker'
+            });
+            marker = L.marker([restaurante.lat, restaurante.lng], { icon: repartidorIcon }).addTo(map);
+            marker.bindPopup('🚚 Repartidor en camino');
+        }
+
+        function subscribeToLocation(pedidoId) {
+            if (subscription) {
+                supabaseClient.removeChannel(subscription);
+            }
+            subscription = supabaseClient
+                .channel(`ubicaciones-${pedidoId}`)
+                .on('postgres_changes', {
+                    event: 'UPDATE',
+                    schema: 'public',
+                    table: 'ubicaciones_repartidor',
+                    filter: `pedido_id=eq.${pedidoId}`
+                }, (payload) => {
+                    const { lat, lng } = payload.new;
+                    if (marker && map) {
+                        const newPos = [lat, lng];
+                        marker.setLatLng(newPos);
+                        map.setView(newPos, map.getZoom());
+                        marker.openPopup();
+                    }
+                })
+                .subscribe();
+        }
+
+        async function render() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const codigo = urlParams.get('codigo');
+            if (!codigo) {
+                document.getElementById('trackingContainer').innerHTML = `<div class="tracking-container"><div class="error"><h2>Código no válido</h2><a href="index.html" class="btn">Volver</a></div></div>`;
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/orders/${codigo}`);
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        document.getElementById('trackingContainer').innerHTML = `<div class="tracking-container"><div class="error"><h2>Pedido no encontrado</h2><a href="index.html" class="btn">Volver</a></div></div>`;
+                    } else {
+                        throw new Error('Error al cargar el pedido');
+                    }
+                    return;
+                }
+                const pedido = await response.json();
+                currentPedido = pedido;
+
+                const status = pedido.status || 'pending';
+                const statusText = getEstadoTexto(status);
+                const statusClass = getEstadoClase(status);
+                const totalItems = pedido.items?.reduce((sum, i) => sum + i.quantity, 0) || 0;
+                const isDelivery = pedido.order_type === 'delivery';
+                const showMap = isDelivery && (status === 'ready' || status === 'delivered');
+                const tipoEntrega = isDelivery ? '🚚 Delivery' : '🏪 Recojo en tienda';
+                const direccion = pedido.delivery_address || 'Av. Larco 123, Miraflores';
+                const metodoPagoMap = { 'yape': 'Yape', 'card': 'Tarjeta', 'bcp': 'Transferencia BCP', 'cash': 'Efectivo' };
+                const metodoPago = metodoPagoMap[pedido.payment_method] || 'Efectivo';
+
+                let mapaHtml = '';
+                if (showMap) {
+                    mapaHtml = `<div id="mapa"></div>`;
+                }
+
+                const html = `
+                    <div class="realtime-badge">
+                        <i class="fas fa-circle"></i> EN VIVO - Actualización automática
+                    </div>
+                    <h1>Seguimiento de pedido</h1>
+                    <div class="order-code-big">${pedido.order_number}</div>
+                    <div class="status-badge ${statusClass}">${statusText}</div>
+                    <div class="status-timeline">
+                        <div class="status-step ${getStepStatus(status, 'pending')}">
+                            <div class="step-dot">1</div>
+                            <div class="status-label">Pedido recibido</div>
+                            <div class="status-time">${getTiempoLabel(pedido.created_at)}</div>
+                        </div>
+                        <div class="status-step ${getStepStatus(status, 'preparing')}">
+                            <div class="step-dot">2</div>
+                            <div class="status-label">Preparando</div>
+                            <div class="status-time">${getTiempoLabel(pedido.started_at)}</div>
+                        </div>
+                        <div class="status-step ${getStepStatus(status, 'ready')}">
+                            <div class="step-dot">3</div>
+                            <div class="status-label">Listo</div>
+                            <div class="status-time">${getTiempoLabel(pedido.ready_at)}</div>
+                        </div>
+                        <div class="status-step ${getStepStatus(status, 'delivered')}">
+                            <div class="step-dot">4</div>
+                            <div class="status-label">Entregado</div>
+                            <div class="status-time">${getTiempoLabel(pedido.delivered_at)}</div>
+                        </div>
+                    </div>
+                    <div class="info-card">
+                        <p><strong>Cliente:</strong> ${pedido.customer_name || 'No especificado'}</p>
+                        <p><strong>Teléfono:</strong> ${pedido.customer_phone || 'No especificado'}</p>
+                        <p><strong>Entrega:</strong> ${tipoEntrega}</p>
+                        <p><strong>Dirección:</strong> ${direccion}</p>
+                        <p><strong>Pago:</strong> ${metodoPago}</p>
+                        <p><strong>Productos:</strong> ${totalItems} items</p>
+                        <p><strong>Total:</strong> S/ ${(pedido.total || 0).toFixed(2)}</p>
+                        ${pedido.notes ? `<p><strong>Notas:</strong> ${pedido.notes}</p>` : ''}
+                    </div>
+                    ${mapaHtml}
+                    <div>
+                        <a href="index.html" class="btn">← Volver al inicio</a>
+                        <a href="#" class="btn btn-outline" onclick="window.print()">🖨️ Imprimir</a>
+                    </div>
+                `;
+
+                document.getElementById('trackingContainer').innerHTML = html;
+
+                if (showMap) {
+                    setTimeout(() => {
+                        initDeliveryMap();
+                        subscribeToLocation(pedido.id);
+                    }, 100);
+                } else {
+                    if (subscription) {
+                        supabaseClient.removeChannel(subscription);
+                        subscription = null;
+                    }
+                    if (map) {
+                        map.remove();
+                        map = null;
+                    }
+                }
+            } catch (error) {
+                console.error(error);
+                document.getElementById('trackingContainer').innerHTML = `<div class="tracking-container"><div class="error"><h2>Error de conexión</h2><p>No se pudo obtener el pedido.</p><a href="index.html" class="btn">Volver</a></div></div>`;
+            }
+        }
+
+        render();
+        setInterval(() => render(), 5000);
+    </script>
+</body>
+</html>

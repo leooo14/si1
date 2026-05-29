@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>LEOPI FOOD - Repartidor</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #0f172a; color: white; }
+        .container { max-width: 600px; margin: auto; background: #1e293b; padding: 20px; border-radius: 20px; }
+        select, button { width: 100%; padding: 12px; margin: 10px 0; border-radius: 30px; border: none; font-size: 16px; }
+        button { background: #f97316; color: white; font-weight: bold; cursor: pointer; }
+        .estado { text-align: center; margin-top: 20px; padding: 10px; border-radius: 20px; }
+        .activo { background: #10b981; }
+        .inactivo { background: #ef4444; }
+        #coords { font-size: 12px; text-align: center; margin-top: 10px; color: #94a3b8; }
+        .mensaje { text-align: center; padding: 20px; color: #f97316; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+    <div class="container">
+        <h2>🚚 Panel del repartidor</h2>
+        <label>Selecciona el pedido que vas a entregar:</label>
+        <select id="pedidoSelect">
+            <option value="">-- Cargando pedidos listos --</option>
+        </select>
+        <button id="startTracking">▶️ Iniciar seguimiento</button>
+        <button id="stopTracking">⏹️ Detener seguimiento</button>
+        <div id="status" class="estado inactivo">❌ No activo</div>
+        <div id="coords"></div>
+        <div id="mensaje" class="mensaje"></div>
+    </div>
+
+    <script>
+        // Configuración de Supabase
+        const supabaseUrl = 'https://jznsyvdasufrvudfglje.supabase.co';
+        const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6bnN5dmRhc3VmcnZ1ZGZnbGplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2ODAyMDgsImV4cCI6MjA5NTI1NjIwOH0.Wb_9F3TfF6ZJqKQxYjZzvFp_LF1RgVqQZPkWxqUjG1s';
+        const supabaseClient = supabase.createClient(supabaseUrl, supabaseKey);
+
+        // Backend API base (tu servidor HTTP)
+        const API_BASE = 'http://64.176.16.35:3000/api';
+
+        let watchId = null;
+        let pedidoActivo = null;
+
+        async function cargarPedidos() {
+            try {
+                const res = await fetch(`${API_BASE}/orders`);
+                if (!res.ok) throw new Error('Error al cargar pedidos');
+                const pedidos = await res.json();
+                // Solo pedidos en estado 'ready' y tipo 'delivery'
+                const listos = pedidos.filter(p => p.status === 'ready' && p.order_type === 'delivery');
+                const select = document.getElementById('pedidoSelect');
+                const mensajeDiv = document.getElementById('mensaje');
+                
+                if (listos.length === 0) {
+                    select.innerHTML = '<option value="">-- No hay pedidos listos --</option>';
+                    mensajeDiv.innerHTML = '⚠️ No hay pedidos en estado "Listo" con delivery. Marca algún pedido como "Listo" desde el administrador.';
+                    return;
+                }
+                mensajeDiv.innerHTML = '';
+                select.innerHTML = '<option value="">-- Selecciona un pedido --</option>';
+                listos.forEach(p => {
+                    const option = document.createElement('option');
+                    option.value = p.id;
+                    option.textContent = `${p.order_number} - ${p.customer_name}`;
+                    select.appendChild(option);
+                });
+            } catch (error) {
+                console.error(error);
+                document.getElementById('mensaje').innerHTML = '❌ Error cargando pedidos. Revisa la conexión.';
+            }
+        }
+
+        async function enviarUbicacion(lat, lng) {
+            if (!pedidoActivo) return;
+            try {
+                const { error } = await supabaseClient
+                    .from('ubicaciones_repartidor')
+                    .upsert({ pedido_id: pedidoActivo, lat, lng, updated_at: new Date() });
+                if (error) throw error;
+                document.getElementById('coords').innerHTML = `📡 Última ubicación: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+            } catch (err) {
+                console.error('Error enviando ubicación', err);
+                document.getElementById('coords').innerHTML = '❌ Error al enviar ubicación';
+            }
+        }
+
+        function iniciarSeguimiento() {
+            if (!pedidoActivo) {
+                alert('Selecciona un pedido primero');
+                return;
+            }
+            if (watchId !== null) {
+                alert('El seguimiento ya está activo');
+                return;
+            }
+            if (!navigator.geolocation) {
+                alert('Tu navegador no soporta geolocalización.');
+                return;
+            }
+            watchId = navigator.geolocation.watchPosition(
+                (position) => {
+                    const { latitude, longitude } = position.coords;
+                    enviarUbicacion(latitude, longitude);
+                    document.getElementById('status').className = 'estado activo';
+                    document.getElementById('status').innerHTML = '✅ Envío de ubicación ACTIVO';
+                },
+                (error) => {
+                    console.error(error);
+                    let msg = 'Error al obtener ubicación. ';
+                    if (error.code === 1) msg += 'Permiso denegado. Asegúrate de dar permiso de ubicación.';
+                    else if (error.code === 2) msg += 'Ubicación no disponible.';
+                    else if (error.code === 3) msg += 'Timeout. Revisa tu conexión.';
+                    alert(msg);
+                    document.getElementById('status').className = 'estado inactivo';
+                    document.getElementById('status').innerHTML = '❌ Error de geolocalización';
+                },
+                { enableHighAccuracy: true, maximumAge: 3000, timeout: 10000 }
+            );
+        }
+
+        function detenerSeguimiento() {
+            if (watchId !== null) {
+                navigator.geolocation.clearWatch(watchId);
+                watchId = null;
+                document.getElementById('status').className = 'estado inactivo';
+                document.getElementById('status').innerHTML = '❌ Seguimiento detenido';
+            }
+        }
+
+        document.getElementById('startTracking').onclick = iniciarSeguimiento;
+        document.getElementById('stopTracking').onclick = detenerSeguimiento;
+        document.getElementById('pedidoSelect').onchange = (e) => {
+            pedidoActivo = parseInt(e.target.value);
+            if (pedidoActivo) {
+                document.getElementById('status').innerHTML = '⏳ Listo para iniciar seguimiento';
+            }
+        };
+
+        cargarPedidos();
+        setInterval(cargarPedidos, 10000);
+    </script>
+</body>
+</html>
