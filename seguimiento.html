@@ -30,6 +30,7 @@
         .btn-outline { background: white; color: #f97316; border: 2px solid #f97316; }
         #mapa { height: 350px; margin: 20px 0; border-radius: 20px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
         .eta-panel { background: #f1f5f9; border-radius: 16px; padding: 12px; margin-top: 10px; font-size: 14px; display: flex; justify-content: space-between; }
+        .map-placeholder { background: #f1f5f9; border-radius: 20px; padding: 40px; text-align: center; color: #64748b; margin: 20px 0; }
         @media (max-width: 768px) { .tracking-container { padding: 30px 20px; margin: 20px; } .order-code-big { font-size: 32px; } }
     </style>
 </head>
@@ -43,29 +44,47 @@
         const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6bnN5dmRhc3VmcnZ1ZGZnbGplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2ODAyMDgsImV4cCI6MjA5NTI1NjIwOH0.nIHQHqEv9Gf_jZNOgpomkJ7SznGqg5dDB40kIVkIgig';
         const supabaseClient = supabase.createClient(supabaseUrl, supabaseKey);
 
-        let map = null, deliveryMarker = null, routingControl = null;
-        let currentPedido = null, destinoCoords = null;
-        let pedidoSubscription = null, ubicacionSubscription = null;
+        let map = null;
+        let deliveryMarker = null;
+        let routingControl = null;
+        let currentPedido = null;
+        let destinoCoords = null;
+        let pedidoSubscription = null;
+        let ubicacionSubscription = null;
 
-        // --- Auxiliares ---
-        function getEstadoTexto(s) { return { pending:'🟡 Pendiente', preparing:'🟠 En preparación', ready:'✅ Listo', delivered:'📦 Entregado', cancelled:'❌ Cancelado' }[s] || 'Desconocido'; }
-        function getEstadoClase(s) { return { pending:'status-pending', preparing:'status-preparing', ready:'status-ready', delivered:'status-delivered', cancelled:'status-cancelled' }[s] || 'status-pending'; }
-        function getTiempoLabel(f) { return f ? new Date(f).toLocaleTimeString('es-ES', { hour:'2-digit', minute:'2-digit' }) : '--:--'; }
-        function getStepStatus(order, step) {
-            const orderIdx = ['pending','preparing','ready','delivered'].indexOf(order);
-            const stepIdx = ['pending','preparing','ready','delivered'].indexOf(step);
+        // --- Funciones auxiliares ---
+        function getEstadoTexto(s) {
+            const estados = { pending:'🟡 Pendiente', preparing:'🟠 En preparación', ready:'✅ Listo', delivered:'📦 Entregado', cancelled:'❌ Cancelado' };
+            return estados[s] || 'Desconocido';
+        }
+        function getEstadoClase(s) {
+            const clases = { pending:'status-pending', preparing:'status-preparing', ready:'status-ready', delivered:'status-delivered', cancelled:'status-cancelled' };
+            return clases[s] || 'status-pending';
+        }
+        function getTiempoLabel(f) {
+            if (!f) return '--:--';
+            return new Date(f).toLocaleTimeString('es-ES', { hour:'2-digit', minute:'2-digit' });
+        }
+        function getStepStatus(orderStatus, stepStatus) {
+            const orderIdx = ['pending','preparing','ready','delivered'].indexOf(orderStatus);
+            const stepIdx = ['pending','preparing','ready','delivered'].indexOf(stepStatus);
             if (stepIdx < orderIdx) return 'completed';
             if (stepIdx === orderIdx) return 'active';
             return '';
         }
 
-        // --- Mapa y marcador ---
+        // --- Mapa y marcador (solo para repartidor) ---
         function initMap(center) {
-            if (map) map.remove();
+            if (map) {
+                map.remove();
+                map = null;
+            }
             const c = center || { lat: -12.119, lng: -77.031 };
             map = L.map('mapa').setView([c.lat, c.lng], 14);
             L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-                attribution: '&copy; OSM & CartoDB', subdomains: 'abcd', maxZoom: 19
+                attribution: '&copy; OSM & CartoDB',
+                subdomains: 'abcd',
+                maxZoom: 19
             }).addTo(map);
         }
 
@@ -74,23 +93,33 @@
             if (deliveryMarker) {
                 deliveryMarker.setLatLng([lat, lng]);
             } else {
-                const motoIcon = L.divIcon({ html: '<div style="background:#f97316; width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:20px; border:2px solid white;">🛵</div>', iconSize:[32,32] });
+                const motoIcon = L.divIcon({
+                    html: '<div style="background:#f97316; width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:20px; border:2px solid white;">🛵</div>',
+                    iconSize: [32, 32]
+                });
                 deliveryMarker = L.marker([lat, lng], { icon: motoIcon }).addTo(map).bindPopup('Repartidor');
             }
             map.setView([lat, lng], map.getZoom());
             deliveryMarker.openPopup();
+            // Actualizar ruta si existe
             if (routingControl && destinoCoords) {
                 routingControl.getPlan().setWaypoints([L.latLng(lat, lng), L.latLng(destinoCoords.lat, destinoCoords.lng)]);
             }
         }
 
-        // --- Geocodificación y coordenadas del destino ---
+        // --- Geocodificación y obtención de coordenadas del destino ---
         async function geocodeAddress(address) {
             if (!address) return null;
             const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`;
-            const resp = await fetch(url, { headers: { 'Accept-Language': 'es' } });
-            const data = await resp.json();
-            if (data && data.length > 0) return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+            try {
+                const resp = await fetch(url, { headers: { 'Accept-Language': 'es' } });
+                const data = await resp.json();
+                if (data && data.length > 0) {
+                    return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+                }
+            } catch (e) {
+                console.error('Error geocodificando:', e);
+            }
             return null;
         }
 
@@ -101,12 +130,14 @@
             if (!pedido.delivery_address) return null;
             const coords = await geocodeAddress(pedido.delivery_address);
             if (coords) {
+                // Guardar en la base de datos para futuras veces
                 await supabaseClient.from('pedidos').update({ destino_lat: coords.lat, destino_lng: coords.lng }).eq('id', pedido.id);
                 return coords;
             }
             return null;
         }
 
+        // --- Cargar última ubicación del repartidor ---
         async function loadLastLocation(pedidoId) {
             const { data, error } = await supabaseClient
                 .from('ubicacion_repartidor')
@@ -116,45 +147,30 @@
             return (data && data.lat && data.lng) ? { lat: data.lat, lng: data.lng } : null;
         }
 
+        // --- Suscripción a cambios de ubicación ---
         function subscribeToLocation(pedidoId) {
             if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
             ubicacionSubscription = supabaseClient
                 .channel(`ubicaciones-${pedidoId}`)
-                .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ubicacion_repartidor', filter: `pedido_id=eq.${pedidoId}` },
-                    (payload) => {
-                        const { lat, lng } = payload.new;
-                        if (lat && lng) updateDeliveryMarker(lat, lng);
-                    })
+                .on('postgres_changes', {
+                    event: 'UPDATE',
+                    schema: 'public',
+                    table: 'ubicacion_repartidor',
+                    filter: `pedido_id=eq.${pedidoId}`
+                }, (payload) => {
+                    const { lat, lng } = payload.new;
+                    if (lat && lng) updateDeliveryMarker(lat, lng);
+                })
                 .subscribe();
         }
 
-        function subscribeToPedido(pedidoId) {
-            if (pedidoSubscription) supabaseClient.removeChannel(pedidoSubscription);
-            pedidoSubscription = supabaseClient
-                .channel(`pedido-${pedidoId}`)
-                .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'pedidos', filter: `id=eq.${pedidoId}` },
-                    (payload) => {
-                        currentPedido = payload.new;
-                        updateUIWithPedido(currentPedido);
-                        const isDelivery = currentPedido.order_type === 'delivery';
-                        const showMap = isDelivery && (currentPedido.status === 'ready' || currentPedido.status === 'delivered');
-                        if (showMap && !map && destinoCoords) iniciarMapaYUbicacion(currentPedido.id);
-                        else if (!showMap && map) limpiarMapa();
-                    })
-                .subscribe();
-        }
-
-        function limpiarMapa() {
-            if (map) map.remove();
-            map = null;
-            deliveryMarker = null;
-            routingControl = null;
-            if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
-        }
-
+        // --- Crear o actualizar la ruta y el mapa ---
         async function iniciarMapaYUbicacion(pedidoId) {
+            if (!destinoCoords) {
+                console.warn('No hay coordenadas de destino, no se puede iniciar el mapa');
+                return;
+            }
             const lastLoc = await loadLastLocation(pedidoId);
-            if (!destinoCoords) return;
             initMap(lastLoc || null);
             if (lastLoc) updateDeliveryMarker(lastLoc.lat, lastLoc.lng);
             if (!routingControl) {
@@ -180,22 +196,46 @@
             subscribeToLocation(pedidoId);
         }
 
+        // --- Limpiar mapa y suscripciones ---
+        function limpiarMapa() {
+            if (map) {
+                map.remove();
+                map = null;
+            }
+            deliveryMarker = null;
+            routingControl = null;
+            if (ubicacionSubscription) {
+                supabaseClient.removeChannel(ubicacionSubscription);
+                ubicacionSubscription = null;
+            }
+        }
+
+        // --- Actualizar toda la interfaz (timeline, info, mapa condicional) ---
         async function updateUIWithPedido(pedido) {
             const status = pedido.status;
             const isDelivery = pedido.order_type === 'delivery';
-            const totalItems = pedido.items?.reduce((s,i)=>s+i.quantity,0) || 0;
-            const tipoEntrega = isDelivery ? '🚚 Delivery' : '🏪 Recojo';
+            const totalItems = pedido.items?.reduce((s,i) => s + i.quantity, 0) || 0;
+            const tipoEntrega = isDelivery ? '🚚 Delivery' : '🏪 Recojo en tienda';
             const metodoPagoMap = { yape:'Yape', card:'Tarjeta', bcp:'Transferencia BCP', cash:'Efectivo' };
             const metodoPago = metodoPagoMap[pedido.payment_method] || 'Efectivo';
 
+            // Si es delivery, aseguramos tener las coordenadas del destino (las guarda en BD si no existen)
             if (isDelivery && !destinoCoords) {
                 destinoCoords = await ensureDestinoCoords(pedido);
             }
 
+            // Determinar si debe mostrarse el mapa: solo delivery y estado ready o delivered
+            const shouldShowMap = isDelivery && (status === 'ready' || status === 'delivered');
+
+            // Verificar si la estructura del timeline ya existe
             const existeTimeline = document.querySelectorAll('.status-step').length > 0;
+
             if (!existeTimeline) {
+                // Primera carga: construir todo el HTML
                 const container = document.getElementById('trackingContainer');
-                container.innerHTML = `
+                const mapaHtml = shouldShowMap ? `<div id="mapa" style="height:350px; margin:20px 0;"></div>` : `<div class="map-placeholder"><i class="fas fa-map-marker-alt"></i> <p>El mapa se activará cuando el pedido esté listo para entrega</p></div>`;
+                const etaHtml = shouldShowMap ? `<div class="eta-panel"><span>🚚 Distancia restante: -- km</span><span>⏱️ Tiempo estimado: -- min</span></div>` : '';
+                const html = `
                     <div class="realtime-badge">🔴 EN VIVO</div>
                     <h1>Seguimiento de pedido</h1>
                     <div class="order-code-big">${pedido.order_number}</div>
@@ -216,12 +256,16 @@
                         <p><strong>Total:</strong> S/ ${(pedido.total || 0).toFixed(2)}</p>
                         ${pedido.notes ? `<p><strong>Notas:</strong> ${pedido.notes}</p>` : ''}
                     </div>
-                    <div id="mapa" style="height:350px; margin:20px 0;"></div>
-                    <div class="eta-panel"><span>🚚 Distancia restante: -- km</span><span>⏱️ Tiempo estimado: -- min</span></div>
-                    <div><a href="http://64.176.16.35/index.html" class="btn">← Volver</a><a href="#" class="btn btn-outline" onclick="window.print()">🖨️ Imprimir</a></div>
+                    ${mapaHtml}
+                    ${etaHtml}
+                    <div>
+                        <a href="http://64.176.16.35/index.html" class="btn">← Volver al inicio</a>
+                        <a href="#" class="btn btn-outline" onclick="window.print()">🖨️ Imprimir</a>
+                    </div>
                 `;
+                container.innerHTML = html;
             } else {
-                // Actualizar timeline y badge dinámicamente
+                // Actualización dinámica: timeline, badge e info card
                 const steps = ['pending','preparing','ready','delivered'];
                 steps.forEach((step, idx) => {
                     const stepDiv = document.querySelectorAll('.status-step')[idx];
@@ -229,47 +273,88 @@
                     const timeSpan = stepDiv?.querySelector('.status-time');
                     if (timeSpan) {
                         let val = '--:--';
-                        if (step==='pending') val = getTiempoLabel(pedido.created_at);
-                        if (step==='preparing') val = getTiempoLabel(pedido.started_at);
-                        if (step==='ready') val = getTiempoLabel(pedido.ready_at);
-                        if (step==='delivered') val = getTiempoLabel(pedido.delivered_at);
+                        if (step === 'pending') val = getTiempoLabel(pedido.created_at);
+                        if (step === 'preparing') val = getTiempoLabel(pedido.started_at);
+                        if (step === 'ready') val = getTiempoLabel(pedido.ready_at);
+                        if (step === 'delivered') val = getTiempoLabel(pedido.delivered_at);
                         timeSpan.innerText = val;
                     }
                 });
                 const badge = document.querySelector('.status-badge');
-                if (badge) { badge.className = `status-badge ${getEstadoClase(status)}`; badge.innerText = getEstadoTexto(status); }
-                const info = document.querySelector('.info-card');
-                if (info) {
-                    info.innerHTML = `<p><strong>Cliente:</strong> ${pedido.customer_name || 'No especificado'}</p>
-                                    <p><strong>Teléfono:</strong> ${pedido.customer_phone || 'No especificado'}</p>
-                                    <p><strong>Entrega:</strong> ${tipoEntrega}</p>
-                                    <p><strong>Dirección:</strong> ${pedido.delivery_address || 'Av. Larco 123, Miraflores'}</p>
-                                    <p><strong>Pago:</strong> ${metodoPago}</p>
-                                    <p><strong>Productos:</strong> ${totalItems} items</p>
-                                    <p><strong>Total:</strong> S/ ${(pedido.total || 0).toFixed(2)}</p>
-                                    ${pedido.notes ? `<p><strong>Notas:</strong> ${pedido.notes}</p>` : ''}`;
+                if (badge) {
+                    badge.className = `status-badge ${getEstadoClase(status)}`;
+                    badge.innerText = getEstadoTexto(status);
+                }
+                const infoCard = document.querySelector('.info-card');
+                if (infoCard) {
+                    infoCard.innerHTML = `
+                        <p><strong>Cliente:</strong> ${pedido.customer_name || 'No especificado'}</p>
+                        <p><strong>Teléfono:</strong> ${pedido.customer_phone || 'No especificado'}</p>
+                        <p><strong>Entrega:</strong> ${tipoEntrega}</p>
+                        <p><strong>Dirección:</strong> ${pedido.delivery_address || 'Av. Larco 123, Miraflores'}</p>
+                        <p><strong>Pago:</strong> ${metodoPago}</p>
+                        <p><strong>Productos:</strong> ${totalItems} items</p>
+                        <p><strong>Total:</strong> S/ ${(pedido.total || 0).toFixed(2)}</p>
+                        ${pedido.notes ? `<p><strong>Notas:</strong> ${pedido.notes}</p>` : ''}
+                    `;
                 }
             }
 
-            const showMap = isDelivery && (status === 'ready' || status === 'delivered');
+            // Gestionar el mapa: si debe mostrarse y no existe, lo creamos; si no debe mostrarse y existe, lo destruimos
             const mapaDiv = document.getElementById('mapa');
-            if (showMap && !map && mapaDiv && destinoCoords) {
-                iniciarMapaYUbicacion(pedido.id);
-            } else if (!showMap && map) {
+            if (shouldShowMap && !map && mapaDiv && destinoCoords) {
+                await iniciarMapaYUbicacion(pedido.id);
+            } else if (!shouldShowMap && map) {
                 limpiarMapa();
+                // Si hay un placeholder, lo dejamos; si no, lo creamos
+                const existingPlaceholder = document.querySelector('.map-placeholder');
+                if (!existingPlaceholder && mapaDiv) {
+                    const placeholder = document.createElement('div');
+                    placeholder.className = 'map-placeholder';
+                    placeholder.innerHTML = '<i class="fas fa-map-marker-alt"></i> <p>El mapa se activará cuando el pedido esté listo para entrega</p>';
+                    mapaDiv.parentNode.replaceChild(placeholder, mapaDiv);
+                }
+            } else if (shouldShowMap && !map && mapaDiv && !destinoCoords) {
+                console.warn('No se pudo iniciar el mapa porque faltan coordenadas del destino');
             }
         }
 
+        // --- Suscripción a cambios del pedido (estado, tiempos) ---
+        function subscribeToPedido(pedidoId) {
+            if (pedidoSubscription) supabaseClient.removeChannel(pedidoSubscription);
+            pedidoSubscription = supabaseClient
+                .channel(`pedido-${pedidoId}`)
+                .on('postgres_changes', {
+                    event: 'UPDATE',
+                    schema: 'public',
+                    table: 'pedidos',
+                    filter: `id=eq.${pedidoId}`
+                }, (payload) => {
+                    console.log('📦 Pedido actualizado:', payload.new);
+                    currentPedido = payload.new;
+                    updateUIWithPedido(currentPedido);
+                })
+                .subscribe();
+        }
+
+        // --- Inicialización principal ---
         async function init() {
             const codigo = new URLSearchParams(window.location.search).get('codigo');
             if (!codigo) return mostrarError('Código no válido');
             try {
-                const { data: pedido, error } = await supabaseClient.from('pedidos').select('*').eq('order_number', codigo).single();
+                const { data: pedido, error } = await supabaseClient
+                    .from('pedidos')
+                    .select('*')
+                    .eq('order_number', codigo)
+                    .single();
                 if (error || !pedido) return mostrarError('Pedido no encontrado');
                 currentPedido = pedido;
                 await updateUIWithPedido(pedido);
                 subscribeToPedido(pedido.id);
-            } catch(e) { console.error(e); mostrarError('Error de conexión'); }
+            } catch (e) {
+                console.error(e);
+                mostrarError('Error de conexión');
+            }
         }
 
         function mostrarError(msg) {
