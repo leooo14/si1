@@ -46,6 +46,7 @@
         let map = null, deliveryMarker = null, routingControl = null;
         let currentPedido = null, destinoCoords = null;
         let pedidoSubscription = null, ubicacionSubscription = null;
+        let mapaInicializado = false;
 
         // --- Funciones auxiliares ---
         function getEstadoTexto(s) {
@@ -67,7 +68,7 @@
             return '';
         }
 
-        // --- Mapa y marcador ---
+        // --- Mapa y marcador (solo se llama cuando estado ready/delivered)---
         function initMap(center) {
             if (map) map.remove();
             const c = center || { lat: -12.119, lng: -77.031 };
@@ -75,6 +76,7 @@
             L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
                 attribution: '&copy; OSM & CartoDB', subdomains: 'abcd', maxZoom: 19
             }).addTo(map);
+            mapaInicializado = true;
         }
 
         function updateDeliveryMarker(lat, lng) {
@@ -95,34 +97,41 @@
             }
         }
 
-        // --- Geocodificación y obtención de coordenadas del destino ---
+        // --- Geocodificación con fallback y caché ---
         async function geocodeAddress(address) {
             if (!address) return null;
-            const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`;
-            const resp = await fetch(url, { headers: { 'Accept-Language': 'es' } });
-            const data = await resp.json();
-            if (data && data.length > 0) {
-                return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
-            }
+            try {
+                const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`;
+                const resp = await fetch(url, { headers: { 'Accept-Language': 'es' } });
+                const data = await resp.json();
+                if (data && data.length > 0) {
+                    return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+                }
+            } catch(e) { console.warn('Geocoding error:', e); }
             return null;
         }
 
         async function ensureDestinoCoords(pedido) {
             // Si ya tenemos coordenadas en memoria, devolverlas
             if (destinoCoords) return destinoCoords;
-            // Si el pedido tiene destino_lat/lng guardados, usarlos
+            // Intentar desde la base de datos
             if (pedido.destino_lat && pedido.destino_lng) {
                 destinoCoords = { lat: pedido.destino_lat, lng: pedido.destino_lng };
                 return destinoCoords;
             }
-            // Si no, geocodificar la dirección
-            if (pedido.delivery_address) {
+            // Si no, geocodificar solo si tenemos dirección y si es delivery y estado ready/delivered
+            if (pedido.order_type === 'delivery' && pedido.delivery_address && 
+                (pedido.status === 'ready' || pedido.status === 'delivered')) {
                 const coords = await geocodeAddress(pedido.delivery_address);
                 if (coords) {
                     destinoCoords = coords;
-                    // Guardar en la base de datos para futuras ocasiones
+                    // Guardar en DB para futuras ocasiones
                     await supabaseClient.from('pedidos').update({ destino_lat: coords.lat, destino_lng: coords.lng }).eq('id', pedido.id);
                     return coords;
+                } else {
+                    // Fallback: coordenadas de Miraflores por si la geocodificación falla
+                    destinoCoords = { lat: -12.119, lng: -77.031 };
+                    return destinoCoords;
                 }
             }
             return null;
@@ -148,7 +157,7 @@
                     filter: `pedido_id=eq.${pedidoId}`
                 }, (payload) => {
                     const { lat, lng } = payload.new;
-                    if (lat && lng) updateDeliveryMarker(lat, lng);
+                    if (lat && lng && map) updateDeliveryMarker(lat, lng);
                 })
                 .subscribe();
         }
@@ -165,14 +174,75 @@
                 }, async (payload) => {
                     const nuevoPedido = payload.new;
                     currentPedido = nuevoPedido;
-                    // Actualizar la interfaz (timeline, info, mapa) con los nuevos datos
-                    await actualizarTodo(nuevoPedido);
+                    // Actualizar timeline y tarjeta
+                    await actualizarUI(nuevoPedido);
+                    // Manejar mapa según nuevo estado
+                    await manejarMapa(nuevoPedido);
                 })
                 .subscribe();
         }
 
-        // Función principal que actualiza toda la UI (timeline, info, mapa) según el estado actual
-        async function actualizarTodo(pedido) {
+        // Función que maneja la creación/eliminación del mapa según estado
+        async function manejarMapa(pedido) {
+            const isDelivery = pedido.order_type === 'delivery';
+            const showMap = isDelivery && (pedido.status === 'ready' || pedido.status === 'delivered');
+            const mapaDiv = document.getElementById('mapa');
+            
+            if (showMap) {
+                // Asegurar que tenemos coordenadas del destino
+                const coords = await ensureDestinoCoords(pedido);
+                if (!coords) return;
+                
+                // Si el mapa no existe, crearlo
+                if (!map) {
+                    const lastLoc = await loadLastLocation(pedido.id);
+                    initMap(lastLoc || null);
+                    if (lastLoc) updateDeliveryMarker(lastLoc.lat, lastLoc.lng);
+                    
+                    // Crear control de rutas
+                    if (!routingControl) {
+                        routingControl = L.Routing.control({
+                            waypoints: lastLoc ? [L.latLng(lastLoc.lat, lastLoc.lng), L.latLng(coords.lat, coords.lng)] : [],
+                            routeWhileDragging: false,
+                            showAlternatives: false,
+                            lineOptions: { styles: [{ color: '#f97316', weight: 4 }] },
+                            addWaypoints: false,
+                            draggableWaypoints: false,
+                            show: false
+                        }).addTo(map);
+                        routingControl.on('routesfound', (e) => {
+                            const route = e.routes[0];
+                            const distance = (route.summary.totalDistance / 1000).toFixed(1);
+                            const duration = Math.round(route.summary.totalTime / 60);
+                            const etaDiv = document.querySelector('.eta-panel');
+                            if (etaDiv) etaDiv.innerHTML = `<span>🚚 Distancia restante: ${distance} km</span><span>⏱️ Tiempo estimado: ${duration} min</span>`;
+                        });
+                    } else if (lastLoc) {
+                        routingControl.getPlan().setWaypoints([L.latLng(lastLoc.lat, lastLoc.lng), L.latLng(coords.lat, coords.lng)]);
+                    }
+                    subscribeToLocation(pedido.id);
+                } else {
+                    // Mapa ya existe, actualizar ruta si es necesario
+                    const lastLoc = await loadLastLocation(pedido.id);
+                    if (lastLoc && routingControl) {
+                        routingControl.getPlan().setWaypoints([L.latLng(lastLoc.lat, lastLoc.lng), L.latLng(coords.lat, coords.lng)]);
+                    }
+                }
+            } else {
+                // Si no debe mostrar mapa, limpiar recursos
+                if (map) {
+                    map.remove();
+                    map = null;
+                    deliveryMarker = null;
+                    routingControl = null;
+                    if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
+                    mapaInicializado = false;
+                }
+            }
+        }
+
+        // Actualiza solo la UI no-mapa (timeline, info)
+        async function actualizarUI(pedido) {
             const status = pedido.status;
             const isDelivery = pedido.order_type === 'delivery';
             const totalItems = pedido.items?.reduce((s,i)=>s+i.quantity,0) || 0;
@@ -180,7 +250,7 @@
             const metodoPagoMap = { yape:'Yape', card:'Tarjeta', bcp:'Transferencia BCP', cash:'Efectivo' };
             const metodoPago = metodoPagoMap[pedido.payment_method] || 'Efectivo';
 
-            // 1. Actualizar timeline y badge de estado
+            // Actualizar timeline
             const steps = ['pending','preparing','ready','delivered'];
             steps.forEach((step, idx) => {
                 const stepDiv = document.querySelectorAll('.status-step')[idx];
@@ -202,8 +272,6 @@
                 badge.className = `status-badge ${getEstadoClase(status)}`;
                 badge.innerText = getEstadoTexto(status);
             }
-
-            // 2. Actualizar tarjeta de información
             const infoCard = document.querySelector('.info-card');
             if (infoCard) {
                 infoCard.innerHTML = `
@@ -217,63 +285,9 @@
                     ${pedido.notes ? `<p><strong>Notas:</strong> ${pedido.notes}</p>` : ''}
                 `;
             }
-
-            // 3. Manejar el mapa según condiciones
-            const showMap = isDelivery && (status === 'ready' || status === 'delivered');
-            const mapaDiv = document.getElementById('mapa');
-            if (showMap) {
-                // Asegurar que tenemos las coordenadas del destino
-                if (!destinoCoords) {
-                    destinoCoords = await ensureDestinoCoords(pedido);
-                }
-                if (destinoCoords) {
-                    // Si el mapa no existe, crearlo
-                    if (!map) {
-                        const lastLoc = await loadLastLocation(pedido.id);
-                        initMap(lastLoc || null);
-                        if (lastLoc) updateDeliveryMarker(lastLoc.lat, lastLoc.lng);
-                        // Crear control de rutas
-                        routingControl = L.Routing.control({
-                            waypoints: lastLoc ? [L.latLng(lastLoc.lat, lastLoc.lng), L.latLng(destinoCoords.lat, destinoCoords.lng)] : [],
-                            routeWhileDragging: false,
-                            showAlternatives: false,
-                            lineOptions: { styles: [{ color: '#f97316', weight: 4 }] },
-                            addWaypoints: false,
-                            draggableWaypoints: false,
-                            show: false
-                        }).addTo(map);
-                        routingControl.on('routesfound', (e) => {
-                            const route = e.routes[0];
-                            const distance = (route.summary.totalDistance / 1000).toFixed(1);
-                            const duration = Math.round(route.summary.totalTime / 60);
-                            const etaDiv = document.querySelector('.eta-panel');
-                            if (etaDiv) etaDiv.innerHTML = `<span>🚚 Distancia restante: ${distance} km</span><span>⏱️ Tiempo estimado: ${duration} min</span>`;
-                        });
-                        // Suscribirse a cambios de ubicación
-                        subscribeToLocation(pedido.id);
-                    } else {
-                        // El mapa ya existe, solo asegurar que la ruta esté actualizada
-                        const lastLoc = await loadLastLocation(pedido.id);
-                        if (lastLoc && routingControl) {
-                            routingControl.getPlan().setWaypoints([L.latLng(lastLoc.lat, lastLoc.lng), L.latLng(destinoCoords.lat, destinoCoords.lng)]);
-                        }
-                    }
-                } else {
-                    console.warn('No se pudieron obtener coordenadas del destino');
-                }
-            } else {
-                // Si no debe mostrar mapa, limpiar recursos
-                if (map) {
-                    map.remove();
-                    map = null;
-                    deliveryMarker = null;
-                    routingControl = null;
-                    if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
-                }
-            }
         }
 
-        // --- Construcción inicial de la página ---
+        // --- Construcción inicial de la página (solo una vez)---
         async function init() {
             const codigo = new URLSearchParams(window.location.search).get('codigo');
             if (!codigo) {
@@ -290,7 +304,7 @@
 
                 currentPedido = pedido;
 
-                // Construir la interfaz HTML estática (solo una vez)
+                // Construir la interfaz HTML estática
                 const container = document.getElementById('trackingContainer');
                 container.innerHTML = `
                     <div class="realtime-badge">🔴 EN VIVO</div>
@@ -318,9 +332,10 @@
                     <div><a href="http://64.176.16.35/index.html" class="btn">← Volver</a><a href="#" class="btn btn-outline" onclick="window.print()">🖨️ Imprimir</a></div>
                 `;
 
-                // Ahora actualizar todo según el pedido (esto decidirá si mostrar mapa o no)
-                await actualizarTodo(pedido);
-                // Suscribirse a cambios futuros del pedido
+                // Primera actualización de UI y mapa
+                await actualizarUI(pedido);
+                await manejarMapa(pedido);
+                // Suscribirse a cambios futuros
                 subscribeToPedido(pedido.id);
             } catch (error) {
                 console.error(error);
