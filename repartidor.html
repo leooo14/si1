@@ -32,24 +32,26 @@
     </div>
 
     <script>
-        // Configuración de Supabase
+        // Configuración de Supabase (usa tus credenciales)
         const supabaseUrl = 'https://jznsyvdasufrvudfglje.supabase.co';
         const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6bnN5dmRhc3VmcnZ1ZGZnbGplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2ODAyMDgsImV4cCI6MjA5NTI1NjIwOH0.Wb_9F3TfF6ZJqKQxYjZzvFp_LF1RgVqQZPkWxqUjG1s';
         const supabaseClient = supabase.createClient(supabaseUrl, supabaseKey);
-
-        // Backend API base (tu servidor HTTP)
-        const API_BASE = 'http://64.176.16.35:3000/api';
 
         let watchId = null;
         let pedidoActivo = null;
 
         async function cargarPedidos() {
             try {
-                const res = await fetch(`${API_BASE}/orders`);
-                if (!res.ok) throw new Error('Error al cargar pedidos');
-                const pedidos = await res.json();
-                // Solo pedidos en estado 'ready' y tipo 'delivery'
-                const listos = pedidos.filter(p => p.status === 'ready' && p.order_type === 'delivery');
+                // Obtener pedidos directamente desde Supabase (HTTPS)
+                const { data: pedidos, error } = await supabaseClient
+                    .from('pedidos')
+                    .select('*')
+                    .eq('status', 'ready')
+                    .eq('order_type', 'delivery');
+
+                if (error) throw error;
+
+                const listos = pedidos || [];
                 const select = document.getElementById('pedidoSelect');
                 const mensajeDiv = document.getElementById('mensaje');
                 
@@ -68,7 +70,7 @@
                 });
             } catch (error) {
                 console.error(error);
-                document.getElementById('mensaje').innerHTML = '❌ Error cargando pedidos. Revisa la conexión.';
+                document.getElementById('mensaje').innerHTML = '❌ Error cargando pedidos. Revisa conexión con Supabase.';
             }
         }
 
@@ -76,7 +78,7 @@
             if (!pedidoActivo) return;
             try {
                 const { error } = await supabaseClient
-                    .from('ubicaciones_repartidor')
+                    .from('ubicacion_repartidor')
                     .upsert({ pedido_id: pedidoActivo, lat, lng, updated_at: new Date() });
                 if (error) throw error;
                 document.getElementById('coords').innerHTML = `📡 Última ubicación: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;

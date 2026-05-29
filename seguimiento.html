@@ -31,10 +31,8 @@
     </style>
 </head>
 <body>
-    <div class="public-container">
-        <div class="tracking-container" id="trackingContainer">
-            Cargando...
-        </div>
+    <div class="tracking-container" id="trackingContainer">
+        Cargando...
     </div>
 
     <script>
@@ -42,15 +40,13 @@
         const supabaseUrl = 'https://jznsyvdasufrvudfglje.supabase.co';
         const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6bnN5dmRhc3VmcnZ1ZGZnbGplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2ODAyMDgsImV4cCI6MjA5NTI1NjIwOH0.Wb_9F3TfF6ZJqKQxYjZzvFp_LF1RgVqQZPkWxqUjG1s';
         const supabaseClient = supabase.createClient(supabaseUrl, supabaseKey);
-        const API_BASE = 'http://64.176.16.35:3000/api';
 
         let map = null;
         let marker = null;
         let subscription = null;
-        let currentPedido = null;
 
         function getEstadoTexto(status) {
-            const estados = { 'pending': '🟡 Pendiente', 'preparing': '🟠 En preparación', 'ready': '✅ Listo para recoger', 'delivered': '📦 Entregado', 'cancelled': '❌ Cancelado' };
+            const estados = { 'pending': '🟡 Pendiente', 'preparing': '🟠 En preparación', 'ready': '✅ Listo', 'delivered': '📦 Entregado', 'cancelled': '❌ Cancelado' };
             return estados[status] || 'Estado desconocido';
         }
 
@@ -78,7 +74,6 @@
                 map.remove();
                 map = null;
             }
-            // Coordenadas iniciales (restaurante)
             const restaurante = { lat: -12.119, lng: -77.031 };
             map = L.map('mapa').setView([restaurante.lat, restaurante.lng], 14);
             L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
@@ -105,14 +100,13 @@
                 .on('postgres_changes', {
                     event: 'UPDATE',
                     schema: 'public',
-                    table: 'ubicaciones_repartidor',
+                    table: 'ubicacion_repartidor',
                     filter: `pedido_id=eq.${pedidoId}`
                 }, (payload) => {
                     const { lat, lng } = payload.new;
                     if (marker && map) {
-                        const newPos = [lat, lng];
-                        marker.setLatLng(newPos);
-                        map.setView(newPos, map.getZoom());
+                        marker.setLatLng([lat, lng]);
+                        map.setView([lat, lng], map.getZoom());
                         marker.openPopup();
                     }
                 })
@@ -123,22 +117,22 @@
             const urlParams = new URLSearchParams(window.location.search);
             const codigo = urlParams.get('codigo');
             if (!codigo) {
-                document.getElementById('trackingContainer').innerHTML = `<div class="tracking-container"><div class="error"><h2>Código no válido</h2><a href="index.html" class="btn">Volver</a></div></div>`;
+                document.getElementById('trackingContainer').innerHTML = `<div class="tracking-container"><div class="error"><h2>Código no válido</h2><a href="http://64.176.16.35/index.html" class="btn">Volver</a></div></div>`;
                 return;
             }
 
             try {
-                const response = await fetch(`${API_BASE}/orders/${codigo}`);
-                if (!response.ok) {
-                    if (response.status === 404) {
-                        document.getElementById('trackingContainer').innerHTML = `<div class="tracking-container"><div class="error"><h2>Pedido no encontrado</h2><a href="index.html" class="btn">Volver</a></div></div>`;
-                    } else {
-                        throw new Error('Error al cargar el pedido');
-                    }
+                // Obtener pedido directamente desde Supabase
+                const { data: pedido, error } = await supabaseClient
+                    .from('pedidos')
+                    .select('*')
+                    .eq('order_number', codigo)
+                    .single();
+
+                if (error || !pedido) {
+                    document.getElementById('trackingContainer').innerHTML = `<div class="tracking-container"><div class="error"><h2>Pedido no encontrado</h2><a href="http://64.176.16.35/index.html" class="btn">Volver</a></div></div>`;
                     return;
                 }
-                const pedido = await response.json();
-                currentPedido = pedido;
 
                 const status = pedido.status || 'pending';
                 const statusText = getEstadoTexto(status);
@@ -197,7 +191,7 @@
                     </div>
                     ${mapaHtml}
                     <div>
-                        <a href="index.html" class="btn">← Volver al inicio</a>
+                        <a href="http://64.176.16.35/index.html" class="btn">← Volver al inicio</a>
                         <a href="#" class="btn btn-outline" onclick="window.print()">🖨️ Imprimir</a>
                     </div>
                 `;
@@ -221,7 +215,7 @@
                 }
             } catch (error) {
                 console.error(error);
-                document.getElementById('trackingContainer').innerHTML = `<div class="tracking-container"><div class="error"><h2>Error de conexión</h2><p>No se pudo obtener el pedido.</p><a href="index.html" class="btn">Volver</a></div></div>`;
+                document.getElementById('trackingContainer').innerHTML = `<div class="tracking-container"><div class="error"><h2>Error de conexión</h2><p>No se pudo obtener el pedido.</p><a href="http://64.176.16.35/index.html" class="btn">Volver</a></div></div>`;
             }
         }
 
