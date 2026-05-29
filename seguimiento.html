@@ -6,6 +6,8 @@
     <title>LEOPI FOOD | Seguimiento de pedido</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
+    <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -27,6 +29,7 @@
         .btn { display: inline-block; padding: 12px 24px; background: #f97316; color: white; text-decoration: none; border-radius: 30px; margin: 10px; transition: all 0.3s; }
         .btn-outline { background: white; color: #f97316; border: 2px solid #f97316; }
         #mapa { height: 350px; margin: 20px 0; border-radius: 20px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        .eta-panel { background: #f1f5f9; border-radius: 16px; padding: 12px; margin-top: 10px; font-size: 14px; display: flex; justify-content: space-between; }
         @media (max-width: 768px) { .tracking-container { padding: 30px 20px; margin: 20px; } .order-code-big { font-size: 32px; } }
     </style>
 </head>
@@ -44,9 +47,11 @@
         // Variables globales
         let map = null;
         let deliveryMarker = null;
+        let routingControl = null;
         let currentPedido = null;
         let pedidoSubscription = null;
         let ubicacionSubscription = null;
+        let destinoCoords = null;     // coordenadas del destino (cliente)
 
         // ---------- Funciones auxiliares ----------
         function getEstadoTexto(status) {
@@ -73,13 +78,13 @@
             return '';
         }
 
-        // ---------- Mapa: solo el marcador del repartidor (moto) ----------
+        // ---------- Mapa: solo marcador del repartidor (moto) ----------
         function initMap(initialLatLng = null) {
             if (map) {
                 map.remove();
                 map = null;
             }
-            const defaultCenter = { lat: -12.119, lng: -77.031 }; // restaurante (solo respaldo)
+            const defaultCenter = { lat: -12.119, lng: -77.031 };
             const center = initialLatLng || defaultCenter;
             map = L.map('mapa').setView([center.lat, center.lng], 14);
             L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
@@ -110,6 +115,14 @@
             }
             map.setView([lat, lng], map.getZoom());
             deliveryMarker.openPopup();
+
+            // También actualizar la ruta si existe routingControl
+            if (routingControl && destinoCoords) {
+                routingControl.getPlan().setWaypoints([
+                    L.latLng(lat, lng),
+                    L.latLng(destinoCoords.lat, destinoCoords.lng)
+                ]);
+            }
         }
 
         async function loadLastLocation(pedidoId) {
@@ -173,6 +186,7 @@
                         if (map) map.remove();
                         map = null;
                         if (deliveryMarker) deliveryMarker = null;
+                        if (routingControl) routingControl = null;
                         if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
                     }
                 })
@@ -189,10 +203,13 @@
             const metodoPagoMap = { 'yape': 'Yape', 'card': 'Tarjeta', 'bcp': 'Transferencia BCP', 'cash': 'Efectivo' };
             const metodoPago = metodoPagoMap[pedido.payment_method] || 'Efectivo';
 
-            // Verificar si ya existe la estructura del timeline
+            // Actualizar destino (coordenadas fijas de ejemplo, idealmente geocodificar)
+            // Por ahora usamos coordenadas fijas: Miraflores centro -12.119, -77.031
+            destinoCoords = { lat: -12.119, lng: -77.031 };
+
             const timelineSteps = document.querySelectorAll('.status-step');
             if (timelineSteps.length > 0) {
-                // Actualizar dinámicamente
+                // Actualización dinámica
                 const steps = ['pending', 'preparing', 'ready', 'delivered'];
                 steps.forEach((step, idx) => {
                     const stepDiv = timelineSteps[idx];
@@ -214,10 +231,8 @@
                     statusBadge.className = `status-badge ${getEstadoClase(status)}`;
                     statusBadge.innerText = getEstadoTexto(status);
                 }
-                // Actualizar datos de la tarjeta de información
                 const infoCard = document.querySelector('.info-card');
                 if (infoCard) {
-                    // Reemplazar contenido de la info-card de forma selectiva
                     infoCard.innerHTML = `
                         <p><strong>Cliente:</strong> ${pedido.customer_name || 'No especificado'}</p>
                         <p><strong>Teléfono:</strong> ${pedido.customer_phone || 'No especificado'}</p>
@@ -228,6 +243,15 @@
                         <p><strong>Total:</strong> S/ ${(pedido.total || 0).toFixed(2)}</p>
                         ${pedido.notes ? `<p><strong>Notas:</strong> ${pedido.notes}</p>` : ''}
                     `;
+                }
+                // Actualizar panel ETA si existe
+                const etaPanel = document.querySelector('.eta-panel');
+                if (!etaPanel && document.getElementById('mapa')) {
+                    const mapaDiv = document.getElementById('mapa');
+                    const etaDiv = document.createElement('div');
+                    etaDiv.className = 'eta-panel';
+                    etaDiv.innerHTML = `<span>🚚 Distancia restante: -- km</span><span>⏱️ Tiempo estimado: -- min</span>`;
+                    mapaDiv.parentNode.insertBefore(etaDiv, mapaDiv.nextSibling);
                 }
             } else {
                 // Primera carga: construir toda la interfaz
@@ -273,6 +297,10 @@
                         ${pedido.notes ? `<p><strong>Notas:</strong> ${pedido.notes}</p>` : ''}
                     </div>
                     ${mapaHtml}
+                    <div class="eta-panel">
+                        <span>🚚 Distancia restante: -- km</span>
+                        <span>⏱️ Tiempo estimado: -- min</span>
+                    </div>
                     <div>
                         <a href="http://64.176.16.35/index.html" class="btn">← Volver al inicio</a>
                         <a href="#" class="btn btn-outline" onclick="window.print()">🖨️ Imprimir</a>
@@ -290,16 +318,57 @@
                 if (map) map.remove();
                 map = null;
                 if (deliveryMarker) deliveryMarker = null;
+                if (routingControl) routingControl = null;
                 if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
             }
         }
 
+        // Función corregida: ahora es async y maneja routing con actualización de ETA
         async function iniciarMapaYUbicacion(pedidoId) {
             const lastLoc = await loadLastLocation(pedidoId);
+            if (!destinoCoords) {
+                console.warn('Destino no definido');
+                return;
+            }
             initMap(lastLoc || null);
+            
+            // Crear control de rutas si no existe
+            if (!routingControl && lastLoc) {
+                routingControl = L.Routing.control({
+                    waypoints: [
+                        L.latLng(lastLoc.lat, lastLoc.lng),
+                        L.latLng(destinoCoords.lat, destinoCoords.lng)
+                    ],
+                    routeWhileDragging: false,
+                    showAlternatives: false,
+                    lineOptions: { styles: [{ color: '#f97316', weight: 4, opacity: 0.7 }] },
+                    addWaypoints: false,
+                    draggableWaypoints: false,
+                    fitSelectedRoutes: false,
+                    show: false  // No muestra el panel de instrucciones, solo la línea
+                }).addTo(map);
+                
+                // Escuchar cuando se calcula la ruta para mostrar ETA
+                routingControl.on('routesfound', function(e) {
+                    const route = e.routes[0];
+                    const distance = (route.summary.totalDistance / 1000).toFixed(1);
+                    const duration = Math.round(route.summary.totalTime / 60);
+                    const etaPanel = document.querySelector('.eta-panel');
+                    if (etaPanel) {
+                        etaPanel.innerHTML = `<span>🚚 Distancia restante: ${distance} km</span><span>⏱️ Tiempo estimado: ${duration} min</span>`;
+                    }
+                });
+            } else if (routingControl && lastLoc) {
+                // Actualizar waypoints si ya existe
+                routingControl.getPlan().setWaypoints([
+                    L.latLng(lastLoc.lat, lastLoc.lng),
+                    L.latLng(destinoCoords.lat, destinoCoords.lng)
+                ]);
+            }
             subscribeToLocation(pedidoId);
         }
 
+        // Inicialización principal
         async function init() {
             const urlParams = new URLSearchParams(window.location.search);
             const codigo = urlParams.get('codigo');
