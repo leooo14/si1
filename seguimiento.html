@@ -105,7 +105,7 @@
         function subscribeToLocation(pedidoId) {
             if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
             ubicacionSubscription = supabaseClient.channel(`ubicaciones-${pedidoId}`)
-                .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ubicacion_repartidor', filter: `pedido_id=eq.${pedidoId}` }, (payload) => {
+                .on('postgres_changes', { event: '*', schema: 'public', table: 'ubicacion_repartidor', filter: `pedido_id=eq.${pedidoId}` }, (payload) => {
                     const { lat, lng } = payload.new;
                     if (lat && lng) updateDeliveryMarker(lat, lng);
                 }).subscribe();
@@ -114,7 +114,7 @@
         function subscribeToPedido(pedidoId) {
             if (pedidoSubscription) supabaseClient.removeChannel(pedidoSubscription);
             pedidoSubscription = supabaseClient.channel(`pedido-${pedidoId}`)
-                .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'pedidos', filter: `id=eq.${pedidoId}` }, async (payload) => {
+                .on('postgres_changes', { event: '*', schema: 'public', table: 'pedidos', filter: `id=eq.${pedidoId}` }, async (payload) => {
                     console.log('📦 Estado actualizado:', payload.new.status);
                     currentPedido = payload.new;
                     await actualizarInterfaz(currentPedido);
