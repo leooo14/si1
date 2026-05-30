@@ -10,7 +10,6 @@
     <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
-        /* (mismos estilos que antes, sin cambios) */
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Inter', sans-serif; background: #f8fafc; padding: 20px; }
         .tracking-container { max-width: 600px; margin: 50px auto; background: white; border-radius: 30px; padding: 40px; box-shadow: 0 20px 40px rgba(0,0,0,0.1); text-align: center; }
@@ -45,11 +44,10 @@
         const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6bnN5dmRhc3VmcnZ1ZGZnbGplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2ODAyMDgsImV4cCI6MjA5NTI1NjIwOH0.nIHQHqEv9Gf_jZNOgpomkJ7SznGqg5dDB40kIVkIgig';
         const supabaseClient = supabase.createClient(supabaseUrl, supabaseKey);
 
-        let map = null, deliveryMarker = null, routingControl = null;
-        let currentPedido = null, destinoCoords = null;
-        let pedidoSubscription = null, ubicacionSubscription = null;
+        let map, deliveryMarker, routingControl;
+        let currentPedido, destinoCoords;
+        let pedidoSubscription, ubicacionSubscription;
 
-        // --- Funciones auxiliares ---
         function getEstadoTexto(s) {
             return { pending:'🟡 Pendiente', preparing:'🟠 En preparación', ready:'✅ Listo', delivered:'📦 Entregado', cancelled:'❌ Cancelado' }[s] || 'Desconocido';
         }
@@ -67,20 +65,12 @@
             return '';
         }
 
-        // --- Obtener coordenadas del destino (sin geocodificación externa, con fallback) ---
         async function obtenerDestinoCoords(pedido) {
-            if (pedido.destino_lat && pedido.destino_lng) {
-                return { lat: pedido.destino_lat, lng: pedido.destino_lng };
-            }
-            if (pedido.order_type === 'delivery') {
-                const coordsPorDefecto = { lat: -12.119, lng: -77.031 };
-                await supabaseClient.from('pedidos').update({ destino_lat: coordsPorDefecto.lat, destino_lng: coordsPorDefecto.lng }).eq('id', pedido.id);
-                return coordsPorDefecto;
-            }
-            return null;
+            if (pedido.destino_lat && pedido.destino_lng) return { lat: pedido.destino_lat, lng: pedido.destino_lng };
+            // Coordenadas por defecto (Miraflores)
+            return { lat: -12.119, lng: -77.031 };
         }
 
-        // --- Mapa y marcador ---
         function initMap(center) {
             if (map) map.remove();
             const c = center || { lat: -12.119, lng: -77.031 };
@@ -88,16 +78,13 @@
             L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
                 attribution: '&copy; OSM & CartoDB', subdomains: 'abcd', maxZoom: 19
             }).addTo(map);
-            if (destinoCoords) {
-                L.marker([destinoCoords.lat, destinoCoords.lng]).addTo(map).bindPopup('📍 Tu dirección');
-            }
+            if (destinoCoords) L.marker([destinoCoords.lat, destinoCoords.lng]).addTo(map).bindPopup('📍 Tu dirección');
         }
 
         function updateDeliveryMarker(lat, lng) {
             if (!map) return;
-            if (deliveryMarker) {
-                deliveryMarker.setLatLng([lat, lng]);
-            } else {
+            if (deliveryMarker) deliveryMarker.setLatLng([lat, lng]);
+            else {
                 const motoIcon = L.divIcon({
                     html: '<div style="background:#f97316; width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:20px; border:2px solid white;">🛵</div>',
                     iconSize: [32,32]
@@ -106,45 +93,40 @@
             }
             map.setView([lat, lng], map.getZoom());
             deliveryMarker.openPopup();
-            if (routingControl && destinoCoords) {
-                routingControl.getPlan().setWaypoints([L.latLng(lat, lng), L.latLng(destinoCoords.lat, destinoCoords.lng)]);
-            }
+            if (routingControl && destinoCoords) routingControl.getPlan().setWaypoints([L.latLng(lat, lng), L.latLng(destinoCoords.lat, destinoCoords.lng)]);
         }
 
         async function loadLastLocation(pedidoId) {
-            const { data, error } = await supabaseClient.from('ubicacion_repartidor').select('lat, lng').eq('pedido_id', pedidoId).maybeSingle();
-            return (data && data.lat && data.lng) ? { lat: data.lat, lng: data.lng } : null;
+            const { data } = await supabaseClient.from('ubicacion_repartidor').select('lat, lng').eq('pedido_id', pedidoId).maybeSingle();
+            if (data?.lat) updateDeliveryMarker(data.lat, data.lng);
+            return data;
         }
 
         function subscribeToLocation(pedidoId) {
             if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
-            ubicacionSubscription = supabaseClient
-                .channel(`ubicaciones-${pedidoId}`)
+            ubicacionSubscription = supabaseClient.channel(`ubicaciones-${pedidoId}`)
                 .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ubicacion_repartidor', filter: `pedido_id=eq.${pedidoId}` }, (payload) => {
                     const { lat, lng } = payload.new;
                     if (lat && lng) updateDeliveryMarker(lat, lng);
-                })
-                .subscribe();
+                }).subscribe();
         }
 
         function subscribeToPedido(pedidoId) {
             if (pedidoSubscription) supabaseClient.removeChannel(pedidoSubscription);
-            pedidoSubscription = supabaseClient
-                .channel(`pedido-${pedidoId}`)
+            pedidoSubscription = supabaseClient.channel(`pedido-${pedidoId}`)
                 .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'pedidos', filter: `id=eq.${pedidoId}` }, async (payload) => {
-                    console.log('📦 Cambio en pedido:', payload.new);
+                    console.log('📦 Estado actualizado:', payload.new.status);
                     currentPedido = payload.new;
-                    await actualizarInterfazCompleta(currentPedido);
-                })
-                .subscribe();
+                    await actualizarInterfaz(currentPedido);
+                }).subscribe();
         }
 
-        async function actualizarInterfazCompleta(pedido) {
+        async function actualizarInterfaz(pedido) {
             const status = pedido.status;
             const isDelivery = pedido.order_type === 'delivery';
             const showMap = isDelivery && (status === 'ready' || status === 'delivered');
 
-            // Actualizar timeline y badge
+            // Actualizar timeline
             const steps = ['pending','preparing','ready','delivered'];
             steps.forEach((step, idx) => {
                 const stepDiv = document.querySelectorAll('.status-step')[idx];
@@ -164,7 +146,7 @@
             const badge = document.querySelector('.status-badge');
             if (badge) { badge.className = `status-badge ${getEstadoClase(status)}`; badge.innerText = getEstadoTexto(status); }
 
-            // Actualizar info-card
+            // Actualizar info
             const infoCard = document.querySelector('.info-card');
             if (infoCard) {
                 const totalItems = pedido.items?.reduce((s,i)=>s+i.quantity,0) || 0;
@@ -185,6 +167,8 @@
 
             const mapaDiv = document.getElementById('mapa');
             if (showMap) {
+                const msgDiv = document.querySelector('.mensaje-info');
+                if (msgDiv) msgDiv.style.display = 'none';
                 if (!destinoCoords) destinoCoords = await obtenerDestinoCoords(pedido);
                 if (destinoCoords) {
                     if (!map) {
@@ -196,9 +180,7 @@
                             routeWhileDragging: false,
                             showAlternatives: false,
                             lineOptions: { styles: [{ color: '#f97316', weight: 4 }] },
-                            addWaypoints: false,
-                            draggableWaypoints: false,
-                            show: false
+                            addWaypoints: false, draggableWaypoints: false, show: false
                         }).addTo(map);
                         routingControl.on('routesfound', (e) => {
                             const route = e.routes[0];
@@ -212,8 +194,6 @@
                         const lastLoc = await loadLastLocation(pedido.id);
                         if (lastLoc && routingControl) routingControl.getPlan().setWaypoints([L.latLng(lastLoc.lat, lastLoc.lng), L.latLng(destinoCoords.lat, destinoCoords.lng)]);
                     }
-                    const msgDiv = document.querySelector('.mensaje-info');
-                    if (msgDiv) msgDiv.style.display = 'none';
                 }
             } else {
                 if (map) {
@@ -233,11 +213,12 @@
 
         async function init() {
             const codigo = new URLSearchParams(location.search).get('codigo');
-            if (!codigo) return mostrarError('Código no válido');
+            if (!codigo) return document.getElementById('trackingContainer').innerHTML = '<div class="tracking-container"><h2>Código no válido</h2><a href="http://64.176.16.35/index.html" class="btn">Volver</a></div>';
             try {
                 const { data: pedido, error } = await supabaseClient.from('pedidos').select('*').eq('order_number', codigo).single();
-                if (error || !pedido) return mostrarError('Pedido no encontrado');
+                if (error || !pedido) throw new Error('Pedido no encontrado');
                 currentPedido = pedido;
+                destinoCoords = await obtenerDestinoCoords(pedido);
                 document.getElementById('trackingContainer').innerHTML = `
                     <div class="realtime-badge">🔴 EN VIVO</div>
                     <h1>Seguimiento de pedido</h1>
@@ -254,15 +235,13 @@
                     <div class="eta-panel"><span>🚚 Distancia restante: -- km</span><span>⏱️ Tiempo estimado: -- min</span></div>
                     <div><a href="http://64.176.16.35/index.html" class="btn">← Volver al inicio</a><a href="#" class="btn btn-outline" onclick="window.print()">🖨️ Imprimir</a></div>
                 `;
-                await actualizarInterfazCompleta(pedido);
+                await actualizarInterfaz(pedido);
                 subscribeToPedido(pedido.id);
-            } catch(e) { console.error(e); mostrarError('Error de conexión'); }
+            } catch (err) {
+                console.error(err);
+                document.getElementById('trackingContainer').innerHTML = `<div class="tracking-container"><h2>Error</h2><p>${err.message}</p><a href="http://64.176.16.35/index.html" class="btn">Volver</a></div>`;
+            }
         }
-
-        function mostrarError(msg) {
-            document.getElementById('trackingContainer').innerHTML = `<div class="tracking-container"><div class="error"><h2>${msg}</h2><a href="http://64.176.16.35/index.html" class="btn">Volver</a></div></div>`;
-        }
-
         init();
     </script>
 </body>

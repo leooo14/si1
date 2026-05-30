@@ -14,9 +14,8 @@
         body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #1e293b; color: white; }
         .container { max-width: 800px; margin: 0 auto; }
         .pedidos-lista { background: #0f172a; border-radius: 16px; padding: 20px; margin-bottom: 20px; }
-        .pedido-item { background: #1e293b; margin-bottom: 12px; padding: 15px; border-radius: 12px; cursor: pointer; transition: all 0.2s; border-left: 4px solid #f97316; }
+        .pedido-item { background: #1e293b; margin-bottom: 12px; padding: 15px; border-radius: 12px; cursor: pointer; border-left: 4px solid #f97316; }
         .pedido-item:hover { background: #334155; transform: translateX(4px); }
-        .pedido-item.seleccionado { background: #f97316; color: #0f172a; border-left-color: white; }
         .pedido-numero { font-weight: bold; font-size: 18px; }
         .pedido-cliente { font-size: 14px; opacity: 0.8; margin-top: 4px; }
         .badge { display: inline-block; padding: 4px 8px; border-radius: 20px; font-size: 12px; margin-top: 8px; }
@@ -37,7 +36,6 @@
         <h2>📋 Selecciona un pedido para entregar</h2>
         <div id="pedidosList"></div>
     </div>
-
     <div id="trackingPanel" class="info-panel">
         <button id="btnVolver" class="volver">← Volver a la lista</button>
         <div><strong>Pedido:</strong> <span id="orderNumber">---</span></div>
@@ -48,7 +46,6 @@
         <button id="btnEntregar">✅ Marcar como entregado</button>
     </div>
 </div>
-
 <script>
     const supabaseUrl = 'https://jznsyvdasufrvudfglje.supabase.co';
     const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6bnN5dmRhc3VmcnZ1ZGZnbGplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2ODAyMDgsImV4cCI6MjA5NTI1NjIwOH0.nIHQHqEv9Gf_jZNOgpomkJ7SznGqg5dDB40kIVkIgig';
@@ -57,159 +54,103 @@
     let map, routingControl, watchId, currentPedido, destinoCoords;
     let subscriptionPedidos = null;
 
-    // Cargar lista de pedidos disponibles (delivery en estado preparing o ready)
     async function cargarPedidos() {
-        const { data, error } = await supabase
-            .from('pedidos')
-            .select('*')
-            .eq('order_type', 'delivery')
-            .in('status', ['preparing', 'ready'])
-            .order('created_at', { ascending: false });
-
-        if (error) {
-            console.error(error);
-            document.getElementById('pedidosList').innerHTML = '<p>Error cargando pedidos</p>';
-            return;
-        }
-        if (data.length === 0) {
-            document.getElementById('pedidosList').innerHTML = '<p>No hay pedidos para entregar en este momento.</p>';
-            return;
-        }
+        const { data, error } = await supabase.from('pedidos').select('*').eq('order_type', 'delivery').in('status', ['preparing', 'ready']).order('created_at', { ascending: false });
+        if (error) { console.error(error); document.getElementById('pedidosList').innerHTML = '<p>Error cargando pedidos</p>'; return; }
+        if (!data.length) { document.getElementById('pedidosList').innerHTML = '<p>No hay pedidos para entregar.</p>'; return; }
         let html = '';
         data.forEach(ped => {
             const estadoTexto = ped.status === 'ready' ? '✅ Listo' : '🟠 En preparación';
-            html += `
-                <div class="pedido-item" data-id="${ped.id}" data-number="${ped.order_number}">
-                    <div class="pedido-numero">${ped.order_number}</div>
-                    <div class="pedido-cliente">${ped.customer_name || 'Cliente'} - ${ped.delivery_address || 'Sin dirección'}</div>
-                    <div class="badge ${ped.status}">${estadoTexto}</div>
-                </div>
-            `;
+            html += `<div class="pedido-item" data-id="${ped.id}" data-number="${ped.order_number}" data-lat="${ped.destino_lat || ''}" data-lng="${ped.destino_lng || ''}">
+                        <div class="pedido-numero">${ped.order_number}</div>
+                        <div class="pedido-cliente">${ped.customer_name || 'Cliente'} - ${ped.delivery_address || 'Sin dirección'}</div>
+                        <div class="badge ${ped.status}">${estadoTexto}</div>
+                    </div>`;
         });
         document.getElementById('pedidosList').innerHTML = html;
-
-        // Agregar eventos click a cada pedido
         document.querySelectorAll('.pedido-item').forEach(el => {
             el.addEventListener('click', () => {
                 const id = parseInt(el.dataset.id);
-                const orderNumber = el.dataset.number;
-                seleccionarPedido(id, orderNumber);
+                const number = el.dataset.number;
+                const lat = el.dataset.lat ? parseFloat(el.dataset.lat) : null;
+                const lng = el.dataset.lng ? parseFloat(el.dataset.lng) : null;
+                seleccionarPedido(id, number, lat, lng);
             });
         });
     }
 
-    async function seleccionarPedido(pedidoId, orderNumber) {
-        // Ocultar lista, mostrar panel de tracking
+    async function seleccionarPedido(pedidoId, orderNumber, lat, lng) {
         document.getElementById('listaPanel').style.display = 'none';
         document.getElementById('trackingPanel').style.display = 'block';
-
-        // Cargar datos completos del pedido
-        const { data: pedido, error } = await supabase
-            .from('pedidos')
-            .select('*')
-            .eq('id', pedidoId)
-            .single();
-
-        if (error || !pedido) {
-            alert('Error al cargar el pedido');
-            volverLista();
-            return;
+        if (lat && lng) {
+            destinoCoords = { lat, lng };
+            currentPedido = { id: pedidoId, order_number: orderNumber };
+            const { data: pedido } = await supabase.from('pedidos').select('customer_name, delivery_address').eq('id', pedidoId).single();
+            if (pedido) {
+                document.getElementById('customerName').innerText = pedido.customer_name || '---';
+                document.getElementById('customerAddress').innerText = pedido.delivery_address || '---';
+                currentPedido.customer_name = pedido.customer_name;
+                currentPedido.delivery_address = pedido.delivery_address;
+            }
+        } else {
+            const { data: pedido, error } = await supabase.from('pedidos').select('*').eq('id', pedidoId).single();
+            if (error || !pedido) { alert('Error al cargar'); volverLista(); return; }
+            currentPedido = pedido;
+            document.getElementById('orderNumber').innerText = pedido.order_number;
+            document.getElementById('customerName').innerText = pedido.customer_name || '---';
+            document.getElementById('customerAddress').innerText = pedido.delivery_address || '---';
+            destinoCoords = await obtenerDestinoCoords(pedido);
         }
-        currentPedido = pedido;
-        document.getElementById('orderNumber').innerText = pedido.order_number;
-        document.getElementById('customerName').innerText = pedido.customer_name || '---';
-        document.getElementById('customerAddress').innerText = pedido.delivery_address || '---';
-
-        // Obtener coordenadas del destino (si no tiene, asignar por defecto)
-        destinoCoords = await obtenerDestinoCoords(pedido);
-        if (!destinoCoords) {
-            alert('No se pudo determinar la dirección del cliente');
-            volverLista();
-            return;
-        }
-
-        // Inicializar mapa
+        if (!destinoCoords) { alert('No se pudo obtener la dirección'); volverLista(); return; }
         if (map) map.remove();
         map = L.map('mapa').setView([destinoCoords.lat, destinoCoords.lng], 13);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
         L.marker([destinoCoords.lat, destinoCoords.lng]).addTo(map).bindPopup('📍 Cliente');
-
-        // Iniciar tracking si el pedido no está entregado
-        if (pedido.status === 'delivered') {
+        if (currentPedido.status === 'delivered') {
             document.getElementById('btnEntregar').disabled = true;
             document.getElementById('etaPanel').innerHTML = '✅ Pedido ya entregado';
-        } else {
-            startTracking();
+            return;
         }
-
-        // Botón entregar
-        const btnEntregar = document.getElementById('btnEntregar');
-        btnEntregar.onclick = async () => {
-            const { error } = await supabase
-                .from('pedidos')
-                .update({ status: 'delivered', delivered_at: new Date() })
-                .eq('id', pedido.id);
+        startTracking();
+        document.getElementById('btnEntregar').onclick = async () => {
+            const { error } = await supabase.from('pedidos').update({ status: 'delivered', delivered_at: new Date() }).eq('id', currentPedido.id);
             if (!error) {
                 alert('Pedido entregado');
                 if (watchId) navigator.geolocation.clearWatch(watchId);
-                btnEntregar.disabled = true;
+                document.getElementById('btnEntregar').disabled = true;
                 document.getElementById('etaPanel').innerHTML = '✅ Pedido entregado';
-                // Volver a la lista después de 2 segundos
                 setTimeout(() => volverLista(), 2000);
-            } else {
-                alert('Error al actualizar');
-            }
+            } else alert('Error');
         };
     }
 
     async function obtenerDestinoCoords(pedido) {
-        if (pedido.destino_lat && pedido.destino_lng) {
-            return { lat: pedido.destino_lat, lng: pedido.destino_lng };
-        }
-        // Coordenadas por defecto (Miraflores)
+        if (pedido.destino_lat && pedido.destino_lng) return { lat: pedido.destino_lat, lng: pedido.destino_lng };
         const coords = { lat: -12.119, lng: -77.031 };
-        // Guardar en BD para futuras ocasiones
         await supabase.from('pedidos').update({ destino_lat: coords.lat, destino_lng: coords.lng }).eq('id', pedido.id);
         return coords;
     }
 
     function startTracking() {
-        if (!navigator.geolocation) {
-            alert('Geolocalización no soportada');
-            return;
-        }
+        if (!navigator.geolocation) { alert('Geolocalización no soportada'); return; }
         if (watchId) navigator.geolocation.clearWatch(watchId);
-        watchId = navigator.geolocation.watchPosition(
-            async (pos) => {
-                const { latitude, longitude } = pos.coords;
-                if (!routingControl) {
-                    routingControl = L.Routing.control({
-                        waypoints: [L.latLng(latitude, longitude), L.latLng(destinoCoords.lat, destinoCoords.lng)],
-                        routeWhileDragging: false,
-                        showAlternatives: false,
-                        lineOptions: { styles: [{ color: '#3388ff', weight: 5 }] },
-                        addWaypoints: false,
-                        draggableWaypoints: false
-                    }).addTo(map);
-                    routingControl.on('routesfound', (e) => {
-                        const r = e.routes[0];
-                        const dist = (r.summary.totalDistance / 1000).toFixed(1);
-                        const time = Math.round(r.summary.totalTime / 60);
-                        document.getElementById('etaPanel').innerHTML = `📏 Distancia restante: ${dist} km · ⏱️ ${time} minutos`;
-                    });
-                } else {
-                    routingControl.getPlan().setWaypoints([L.latLng(latitude, longitude), L.latLng(destinoCoords.lat, destinoCoords.lng)]);
-                }
-                await supabase.from('ubicacion_repartidor').upsert({
-                    pedido_id: currentPedido.id,
-                    lat: latitude,
-                    lng: longitude,
-                    updated_at: new Date()
+        watchId = navigator.geolocation.watchPosition(async (pos) => {
+            const { latitude, longitude } = pos.coords;
+            if (!routingControl) {
+                routingControl = L.Routing.control({
+                    waypoints: [L.latLng(latitude, longitude), L.latLng(destinoCoords.lat, destinoCoords.lng)],
+                    routeWhileDragging: false, showAlternatives: false, lineOptions: { styles: [{ color: '#3388ff', weight: 5 }] },
+                    addWaypoints: false, draggableWaypoints: false
+                }).addTo(map);
+                routingControl.on('routesfound', (e) => {
+                    const r = e.routes[0];
+                    const dist = (r.summary.totalDistance / 1000).toFixed(1);
+                    const time = Math.round(r.summary.totalTime / 60);
+                    document.getElementById('etaPanel').innerHTML = `📏 Distancia restante: ${dist} km · ⏱️ ${time} minutos`;
                 });
-            },
-            (err) => console.error('Error GPS:', err),
-            { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
-        );
+            } else routingControl.getPlan().setWaypoints([L.latLng(latitude, longitude), L.latLng(destinoCoords.lat, destinoCoords.lng)]);
+            await supabase.from('ubicacion_repartidor').upsert({ pedido_id: currentPedido.id, lat: latitude, lng: longitude, updated_at: new Date() });
+        }, (err) => console.error('GPS error:', err), { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 });
     }
 
     function volverLista() {
@@ -218,33 +159,20 @@
         if (map) map.remove();
         document.getElementById('trackingPanel').style.display = 'none';
         document.getElementById('listaPanel').style.display = 'block';
-        cargarPedidos(); // refrescar lista
+        cargarPedidos();
     }
 
-    document.getElementById('btnVolver').addEventListener('click', volverLista);
-
-    // Suscripción en tiempo real para actualizar la lista automáticamente
+    document.getElementById('btnVolver').onclick = volverLista;
     function suscribirActualizacionPedidos() {
         if (subscriptionPedidos) supabase.removeChannel(subscriptionPedidos);
-        subscriptionPedidos = supabase
-            .channel('pedidos-repartidor')
+        subscriptionPedidos = supabase.channel('pedidos-repartidor')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'pedidos' }, () => {
-                // Si estamos en la lista, recargarla; si estamos en tracking, podríamos actualizar datos
-                if (document.getElementById('listaPanel').style.display !== 'none') {
-                    cargarPedidos();
-                } else if (currentPedido) {
-                    // Opcional: actualizar info del pedido actual si cambia estado
-                    supabase.from('pedidos').select('*').eq('id', currentPedido.id).single().then(({ data }) => {
-                        if (data && data.status === 'delivered') {
-                            alert('Este pedido fue marcado como entregado por otro dispositivo');
-                            volverLista();
-                        }
-                    });
-                }
-            })
-            .subscribe();
+                if (document.getElementById('listaPanel').style.display !== 'none') cargarPedidos();
+                else if (currentPedido) supabase.from('pedidos').select('status').eq('id', currentPedido.id).single().then(({ data }) => {
+                    if (data?.status === 'delivered') { alert('Pedido marcado como entregado'); volverLista(); }
+                });
+            }).subscribe();
     }
-
     cargarPedidos();
     suscribirActualizacionPedidos();
 </script>
