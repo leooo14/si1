@@ -10,6 +10,7 @@
     <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
+        /* ========== TU CSS ACTUAL (sin cambios) ========== */
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Inter', sans-serif; background: #f8fafc; padding: 20px; }
         .tracking-container { max-width: 600px; margin: 50px auto; background: white; border-radius: 30px; padding: 40px; box-shadow: 0 20px 40px rgba(0,0,0,0.1); text-align: center; }
@@ -40,14 +41,21 @@
     </div>
 
     <script>
-        const supabaseUrl = 'https://jznsyvdasufrvudfglje.supabase.co';
+        // ========== CONFIGURACIÓN SUPABASE ==========
+        const supabaseUrl = 'https://jznsyvdasufrvudfglje.supabase.co/rest/v1/';
         const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6bnN5dmRhc3VmcnZ1ZGZnbGplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2ODAyMDgsImV4cCI6MjA5NTI1NjIwOH0.nIHQHqEv9Gf_jZNOgpomkJ7SznGqg5dDB40kIVkIgig';
         const supabaseClient = supabase.createClient(supabaseUrl, supabaseKey);
 
-        let map, deliveryMarker, routingControl;
-        let currentPedido, destinoCoords;
-        let pedidoSubscription, ubicacionSubscription;
+        // ========== VARIABLES GLOBALES ==========
+        let map = null;
+        let deliveryMarker = null;
+        let routingControl = null;
+        let currentPedido = null;
+        let destinoCoords = null;
+        let pedidoSubscription = null;
+        let ubicacionSubscription = null;
 
+        // ========== FUNCIONES AUXILIARES ==========
         function getEstadoTexto(s) {
             return { pending:'🟡 Pendiente', preparing:'🟠 En preparación', ready:'✅ Listo', delivered:'📦 Entregado', cancelled:'❌ Cancelado' }[s] || 'Desconocido';
         }
@@ -65,12 +73,27 @@
             return '';
         }
 
+        // ========== OBTENER COORDENADAS DEL CLIENTE (desde la BD o fallback) ==========
         async function obtenerDestinoCoords(pedido) {
-            if (pedido.destino_lat && pedido.destino_lng) return { lat: pedido.destino_lat, lng: pedido.destino_lng };
-            // Coordenadas por defecto (Miraflores)
-            return { lat: -12.119, lng: -77.031 };
+            // 1️⃣ Prioridad: columnas destino_lat / destino_lng de la tabla pedidos
+            if (pedido.destino_lat && pedido.destino_lng) {
+                return { lat: pedido.destino_lat, lng: pedido.destino_lng };
+            }
+            // 2️⃣ Si no existen y el pedido es delivery, usar coordenadas por defecto (Miraflores) y guardarlas
+            if (pedido.order_type === 'delivery') {
+                const coordsPorDefecto = { lat: -12.119, lng: -77.031 };
+                // Guardar en la BD para futuras ocasiones
+                await supabaseClient
+                    .from('pedidos')
+                    .update({ destino_lat: coordsPorDefecto.lat, destino_lng: coordsPorDefecto.lng })
+                    .eq('id', pedido.id);
+                console.log('Coordenadas por defecto guardadas para el pedido', pedido.order_number);
+                return coordsPorDefecto;
+            }
+            return null;
         }
 
+        // ========== INICIALIZAR MAPA (SIN MARCADOR FIJO) ==========
         function initMap(center) {
             if (map) map.remove();
             const c = center || { lat: -12.119, lng: -77.031 };
@@ -78,13 +101,18 @@
             L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
                 attribution: '&copy; OSM & CartoDB', subdomains: 'abcd', maxZoom: 19
             }).addTo(map);
-            if (destinoCoords) L.marker([destinoCoords.lat, destinoCoords.lng]).addTo(map).bindPopup('📍 Tu dirección');
+            // Mostrar marcador del cliente (destino) solo si tenemos coordenadas
+            if (destinoCoords) {
+                L.marker([destinoCoords.lat, destinoCoords.lng]).addTo(map).bindPopup('📍 Tu dirección');
+            }
         }
 
+        // ========== ACTUALIZAR MARCADOR DEL REPARTIDOR ==========
         function updateDeliveryMarker(lat, lng) {
             if (!map) return;
-            if (deliveryMarker) deliveryMarker.setLatLng([lat, lng]);
-            else {
+            if (deliveryMarker) {
+                deliveryMarker.setLatLng([lat, lng]);
+            } else {
                 const motoIcon = L.divIcon({
                     html: '<div style="background:#f97316; width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:20px; border:2px solid white;">🛵</div>',
                     iconSize: [32,32]
@@ -93,40 +121,69 @@
             }
             map.setView([lat, lng], map.getZoom());
             deliveryMarker.openPopup();
-            if (routingControl && destinoCoords) routingControl.getPlan().setWaypoints([L.latLng(lat, lng), L.latLng(destinoCoords.lat, destinoCoords.lng)]);
+            // Actualizar la ruta si existe el control de rutas
+            if (routingControl && destinoCoords) {
+                routingControl.getPlan().setWaypoints([L.latLng(lat, lng), L.latLng(destinoCoords.lat, destinoCoords.lng)]);
+            }
         }
 
+        // ========== CARGAR ÚLTIMA UBICACIÓN CONOCIDA DEL REPARTIDOR ==========
         async function loadLastLocation(pedidoId) {
-            const { data } = await supabaseClient.from('ubicacion_repartidor').select('lat, lng').eq('pedido_id', pedidoId).maybeSingle();
-            if (data?.lat) updateDeliveryMarker(data.lat, data.lng);
-            return data;
+            const { data, error } = await supabaseClient
+                .from('ubicacion_repartidor')
+                .select('lat, lng')
+                .eq('pedido_id', pedidoId)
+                .maybeSingle();
+            if (data && data.lat && data.lng) {
+                updateDeliveryMarker(data.lat, data.lng);
+                return { lat: data.lat, lng: data.lng };
+            }
+            return null;
         }
 
+        // ========== SUSCRIPCIÓN A UBICACIÓN DEL REPARTIDOR (REALTIME) ==========
         function subscribeToLocation(pedidoId) {
             if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
-            ubicacionSubscription = supabaseClient.channel(`ubicaciones-${pedidoId}`)
-                .on('postgres_changes', { event: '*', schema: 'public', table: 'ubicacion_repartidor', filter: `pedido_id=eq.${pedidoId}` }, (payload) => {
+            ubicacionSubscription = supabaseClient
+                .channel(`ubicaciones-${pedidoId}`)
+                .on('postgres_changes', {
+                    event: 'UPDATE',
+                    schema: 'public',
+                    table: 'ubicacion_repartidor',
+                    filter: `pedido_id=eq.${pedidoId}`
+                }, (payload) => {
                     const { lat, lng } = payload.new;
                     if (lat && lng) updateDeliveryMarker(lat, lng);
-                }).subscribe();
+                })
+                .subscribe();
         }
 
+        // ========== SUSCRIPCIÓN A CAMBIOS DEL PEDIDO (REALTIME) ==========
         function subscribeToPedido(pedidoId) {
             if (pedidoSubscription) supabaseClient.removeChannel(pedidoSubscription);
-            pedidoSubscription = supabaseClient.channel(`pedido-${pedidoId}`)
-                .on('postgres_changes', { event: '*', schema: 'public', table: 'pedidos', filter: `id=eq.${pedidoId}` }, async (payload) => {
-                    console.log('📦 Estado actualizado:', payload.new.status);
+            pedidoSubscription = supabaseClient
+                .channel(`pedido-${pedidoId}`)
+                .on('postgres_changes', {
+                    event: 'UPDATE',
+                    schema: 'public',
+                    table: 'pedidos',
+                    filter: `id=eq.${pedidoId}`
+                }, async (payload) => {
+                    console.log('📦 Pedido actualizado en tiempo real:', payload.new);
                     currentPedido = payload.new;
-                    await actualizarInterfaz(currentPedido);
-                }).subscribe();
+                    await actualizarInterfazCompleta(currentPedido);
+                })
+                .subscribe();
         }
 
-        async function actualizarInterfaz(pedido) {
+        // ========== ACTUALIZAR TODA LA INTERFAZ (TIMELINE, INFO, MAPA) ==========
+        async function actualizarInterfazCompleta(pedido) {
             const status = pedido.status;
             const isDelivery = pedido.order_type === 'delivery';
+            // El mapa SOLO se muestra si es delivery y el estado es 'ready' o 'delivered'
             const showMap = isDelivery && (status === 'ready' || status === 'delivered');
 
-            // Actualizar timeline
+            // 1️⃣ Actualizar timeline de estados
             const steps = ['pending','preparing','ready','delivered'];
             steps.forEach((step, idx) => {
                 const stepDiv = document.querySelectorAll('.status-step')[idx];
@@ -144,9 +201,12 @@
                 }
             });
             const badge = document.querySelector('.status-badge');
-            if (badge) { badge.className = `status-badge ${getEstadoClase(status)}`; badge.innerText = getEstadoTexto(status); }
+            if (badge) {
+                badge.className = `status-badge ${getEstadoClase(status)}`;
+                badge.innerText = getEstadoTexto(status);
+            }
 
-            // Actualizar info
+            // 2️⃣ Actualizar tarjeta de información del pedido
             const infoCard = document.querySelector('.info-card');
             if (infoCard) {
                 const totalItems = pedido.items?.reduce((s,i)=>s+i.quantity,0) || 0;
@@ -166,21 +226,29 @@
             }
 
             const mapaDiv = document.getElementById('mapa');
+            // 3️⃣ Mostrar/ocultar mapa según condición
             if (showMap) {
+                // Ocultar mensaje informativo si existe
                 const msgDiv = document.querySelector('.mensaje-info');
                 if (msgDiv) msgDiv.style.display = 'none';
-                if (!destinoCoords) destinoCoords = await obtenerDestinoCoords(pedido);
+                // Asegurar que tenemos coordenadas del destino
+                if (!destinoCoords) {
+                    destinoCoords = await obtenerDestinoCoords(pedido);
+                }
                 if (destinoCoords) {
                     if (!map) {
                         const lastLoc = await loadLastLocation(pedido.id);
                         initMap(lastLoc || null);
                         if (lastLoc) updateDeliveryMarker(lastLoc.lat, lastLoc.lng);
+                        // Crear control de rutas (línea naranja)
                         routingControl = L.Routing.control({
                             waypoints: lastLoc ? [L.latLng(lastLoc.lat, lastLoc.lng), L.latLng(destinoCoords.lat, destinoCoords.lng)] : [],
                             routeWhileDragging: false,
                             showAlternatives: false,
                             lineOptions: { styles: [{ color: '#f97316', weight: 4 }] },
-                            addWaypoints: false, draggableWaypoints: false, show: false
+                            addWaypoints: false,
+                            draggableWaypoints: false,
+                            show: false
                         }).addTo(map);
                         routingControl.on('routesfound', (e) => {
                             const route = e.routes[0];
@@ -191,34 +259,59 @@
                         });
                         subscribeToLocation(pedido.id);
                     } else {
+                        // Si el mapa ya existe, solo actualizar la ruta con la última ubicación conocida
                         const lastLoc = await loadLastLocation(pedido.id);
-                        if (lastLoc && routingControl) routingControl.getPlan().setWaypoints([L.latLng(lastLoc.lat, lastLoc.lng), L.latLng(destinoCoords.lat, destinoCoords.lng)]);
+                        if (lastLoc && routingControl) {
+                            routingControl.getPlan().setWaypoints([L.latLng(lastLoc.lat, lastLoc.lng), L.latLng(destinoCoords.lat, destinoCoords.lng)]);
+                        }
                     }
                 }
             } else {
+                // No mostrar mapa: destruir si existe y mostrar mensaje informativo
                 if (map) {
-                    map.remove(); map = null; deliveryMarker = null; routingControl = null;
+                    map.remove();
+                    map = null;
+                    deliveryMarker = null;
+                    routingControl = null;
                     if (ubicacionSubscription) supabaseClient.removeChannel(ubicacionSubscription);
                 }
                 const existingMsg = document.querySelector('.mensaje-info');
                 if (!existingMsg && mapaDiv) {
                     const msgDiv = document.createElement('div');
                     msgDiv.className = 'mensaje-info';
-                    if (!isDelivery) msgDiv.innerHTML = '📦 Tu pedido es para recoger en tienda. Acércate cuando esté listo.';
-                    else if (status !== 'ready' && status !== 'delivered') msgDiv.innerHTML = '🕒 El mapa se activará cuando tu pedido esté listo para enviarse.';
+                    if (!isDelivery) {
+                        msgDiv.innerHTML = '📦 Tu pedido es para recoger en tienda. Acércate cuando esté listo.';
+                    } else if (status !== 'ready' && status !== 'delivered') {
+                        msgDiv.innerHTML = '🕒 El mapa se activará cuando tu pedido esté listo para enviarse.';
+                    }
                     mapaDiv.parentNode.insertBefore(msgDiv, mapaDiv.nextSibling);
-                } else if (existingMsg) existingMsg.style.display = 'block';
+                } else if (existingMsg) {
+                    existingMsg.style.display = 'block';
+                }
             }
         }
 
+        // ========== CARGA INICIAL ==========
         async function init() {
-            const codigo = new URLSearchParams(location.search).get('codigo');
-            if (!codigo) return document.getElementById('trackingContainer').innerHTML = '<div class="tracking-container"><h2>Código no válido</h2><a href="http://64.176.16.35/index.html" class="btn">Volver</a></div>';
+            const codigo = new URLSearchParams(window.location.search).get('codigo');
+            if (!codigo) {
+                document.getElementById('trackingContainer').innerHTML = '<div class="tracking-container"><h2>Código no válido</h2><a href="http://64.176.16.35/index.html" class="btn">Volver</a></div>';
+                return;
+            }
+
             try {
-                const { data: pedido, error } = await supabaseClient.from('pedidos').select('*').eq('order_number', codigo).single();
+                const { data: pedido, error } = await supabaseClient
+                    .from('pedidos')
+                    .select('*')
+                    .eq('order_number', codigo)
+                    .single();
+
                 if (error || !pedido) throw new Error('Pedido no encontrado');
+
                 currentPedido = pedido;
                 destinoCoords = await obtenerDestinoCoords(pedido);
+
+                // Construir la estructura HTML estática (solo una vez)
                 document.getElementById('trackingContainer').innerHTML = `
                     <div class="realtime-badge">🔴 EN VIVO</div>
                     <h1>Seguimiento de pedido</h1>
@@ -235,13 +328,17 @@
                     <div class="eta-panel"><span>🚚 Distancia restante: -- km</span><span>⏱️ Tiempo estimado: -- min</span></div>
                     <div><a href="http://64.176.16.35/index.html" class="btn">← Volver al inicio</a><a href="#" class="btn btn-outline" onclick="window.print()">🖨️ Imprimir</a></div>
                 `;
-                await actualizarInterfaz(pedido);
+
+                // Actualizar interfaz con el pedido (esto decide si mostrar mapa o mensaje)
+                await actualizarInterfazCompleta(pedido);
+                // Suscribirse a cambios futuros del pedido (Realtime)
                 subscribeToPedido(pedido.id);
             } catch (err) {
                 console.error(err);
                 document.getElementById('trackingContainer').innerHTML = `<div class="tracking-container"><h2>Error</h2><p>${err.message}</p><a href="http://64.176.16.35/index.html" class="btn">Volver</a></div>`;
             }
         }
+
         init();
     </script>
 </body>
