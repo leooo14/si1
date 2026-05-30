@@ -200,10 +200,11 @@
 </div>
 
 <script>
-    // --- CONFIGURACIÓN SUPABASE ---
+    // --- CONFIGURACIÓN SUPABASE (variable única para evitar conflictos) ---
     const SUPABASE_URL = 'https://jznsyvdasufrvudfglje.supabase.co';
     const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6bnN5dmRhc3VmcnZ1ZGZnbGplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2ODAyMDgsImV4cCI6MjA5NTI1NjIwOH0.nIHQHqEv9Gf_jZNOgpomkJ7SznGqg5dDB40kIVkIgig';
-    const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    // Usamos un nombre de variable distinto para evitar cualquier conflicto global
+    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
     // --- VARIABLES GLOBALES ---
     let map, routingControl, watchId;
@@ -215,7 +216,7 @@
     async function cargarPedidos() {
         const listaDiv = document.getElementById('pedidosList');
         try {
-            const { data, error } = await supabase
+            const { data, error } = await supabaseClient
                 .from('pedidos')
                 .select('id, order_number, customer_name, delivery_address, status, destino_lat, destino_lng, created_at')
                 .eq('order_type', 'delivery')
@@ -264,7 +265,7 @@
         document.getElementById('trackingPanel').style.display = 'block';
 
         // Obtener datos completos del pedido (por si faltan)
-        const { data: pedido, error } = await supabase
+        const { data: pedido, error } = await supabaseClient
             .from('pedidos')
             .select('*')
             .eq('id', pedidoId)
@@ -287,7 +288,7 @@
         } else {
             // Si no tiene, usar coordenadas por defecto (Miraflores) y guardarlas en la BD
             destinoCoords = { lat: -12.119, lng: -77.031 };
-            await supabase
+            await supabaseClient
                 .from('pedidos')
                 .update({ destino_lat: destinoCoords.lat, destino_lng: destinoCoords.lng })
                 .eq('id', pedido.id);
@@ -315,7 +316,7 @@
 
         // Botón de entregar
         document.getElementById('btnEntregar').onclick = async () => {
-            const { error: updateError } = await supabase
+            const { error: updateError } = await supabaseClient
                 .from('pedidos')
                 .update({ status: 'delivered', delivered_at: new Date() })
                 .eq('id', pedido.id);
@@ -362,7 +363,7 @@
                 }
 
                 // Guardar ubicación en Supabase
-                await supabase
+                await supabaseClient
                     .from('ubicacion_repartidor')
                     .upsert({
                         pedido_id: currentPedido.id,
@@ -396,8 +397,8 @@
 
     // --- SUSCRIPCIÓN EN TIEMPO REAL (para actualizar la lista automáticamente) ---
     function suscribirCambiosPedidos() {
-        if (realtimeChannel) supabase.removeChannel(realtimeChannel);
-        realtimeChannel = supabase
+        if (realtimeChannel) supabaseClient.removeChannel(realtimeChannel);
+        realtimeChannel = supabaseClient
             .channel('repartidor-pedidos')
             .on(
                 'postgres_changes',
@@ -412,12 +413,10 @@
                             alert('Este pedido fue marcado como entregado por el administrador');
                             volverLista();
                         } else {
-                            // Actualizar el estado visible en el panel de tracking (por si cambia de preparing a ready)
-                            const statusBadge = document.querySelector('#trackingPanel .badge');
-                            if (statusBadge) {
-                                // Podríamos mostrar el nuevo estado, pero es más sencillo recargar el pedido
-                                cargarPedidos(); // opcional
-                            }
+                            // Opcional: actualizar el estado visible en el panel de tracking
+                            // Por simplicidad, recargamos la lista y volvemos?
+                            // Mejor solo refrescar datos
+                            cargarPedidos();
                         }
                     }
                 }
